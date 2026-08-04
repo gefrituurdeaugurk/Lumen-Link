@@ -115,6 +115,8 @@ button:focus-visible,select:focus-visible,input:focus-visible{outline:3px solid 
 .err{font-family:var(--mono);font-size:11px;color:var(--paper);background:var(--sig-blue);padding:7px 9px;margin-top:9px;display:none}
 .done{background:var(--sig-yellow);border:2px solid var(--ink);padding:10px;margin-top:12px;display:none;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
 .done .fn{font-family:var(--mono);font-size:11.5px;font-weight:600;word-break:break-all}
+.done.sealed{background:var(--ink);color:var(--paper)}
+.done.sealed button{background:var(--paper);color:var(--ink);border-color:var(--paper)}
 </style>
 </head>
 <body>
@@ -164,6 +166,16 @@ button:focus-visible,select:focus-visible,input:focus-visible{outline:3px solid 
           <option value="0">off (luma only)</option>
         </select>
       </div>
+      <div class="field">
+        <label for="encSel">Encryption</label>
+        <select id="encSel">
+          <option value="0" selected>off</option>
+          <option value="1">on (demo key)</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="row">
       <div class="field" style="flex:0 0 auto">
         <label>&nbsp;</label>
         <button id="txBtn">Start transmit</button>
@@ -204,6 +216,13 @@ button:focus-visible,select:focus-visible,input:focus-visible{outline:3px solid 
       <div class="field" style="flex:0 0 auto">
         <label>&nbsp;</label>
         <button id="rxStop" class="ghost" disabled>Stop</button>
+      </div>
+      <div class="field" style="flex:1 1 130px">
+        <label for="keySel">Decryption key</label>
+        <select id="keySel">
+          <option value="1" selected>receiver has it</option>
+          <option value="0">receiver lacks it</option>
+        </select>
       </div>
     </div>
 
@@ -258,6 +277,8 @@ Chroma pass tracks separately, so you can watch the enhancement layer fall away 
 Drag <b>Green ambient</b> up in loopback: separation on the scope drops, the blue bar stops filling, the yellow one does not. That is the layering doing its job.
 <br><br>
 <b>Try the session layer.</b> Start a transfer, then hit <b>Swap payload</b> partway through. The receiver reports the new object rather than mixing the two, and each file keeps its own progress — swap back and a partly received one resumes where it left off instead of restarting. See <b>SPEC.md §4</b> for why identity, not begin/end markers, is the right primitive for a broadcast fountain.
+<br><br>
+<b>Try encryption.</b> Turn <b>Encryption</b> on, then set <b>Decryption key</b> to <i>receiver lacks it</i>. The read stays perfect — 100% band pass, every symbol collected, payload reassembled and checksum-verified — and it still yields nothing. Perfect reception is not the security boundary; key possession is. The filename is not in the public manifest either: it rides inside the sealed envelope. <b>SPEC.md §11</b>, including what this deliberately does <i>not</i> hide.
 <br><br>
 <b>Camera in a sandboxed frame is often blocked</b> — save this file and open it from disk if the camera button errors.
 </p>
@@ -650,7 +671,9 @@ Drag <b>Green ambient</b> up in loopback: separation on the scope drops, the blu
     /** setId u32, objIndex u16, objCount u16 */
     Set: 3,
     /** Reserved: detached signature over the core record. Not yet defined. */
-    Signature: 4
+    Signature: 4,
+    /** suite u8, keyId u32 — the payload is a sealed envelope (SPEC.md §11). */
+    Encryption: 5
   };
   var utf8 = new TextEncoder();
   var utf8Decode = new TextDecoder();
@@ -675,6 +698,12 @@ Drag <b>Green ambient</b> up in loopback: separation on the scope drops, the blu
       b.set(value, p);
       p += value.length;
     };
+    if (m.encryption) {
+      const v = new Uint8Array(5);
+      v[0] = m.encryption.suite & 255;
+      writeU32BE(v, 1, m.encryption.keyId);
+      put(Tlv.Encryption, v);
+    }
     if (m.set && m.set.objCount > 1) {
       const v = new Uint8Array(8);
       writeU32BE(v, 0, m.set.setId);
@@ -711,6 +740,7 @@ Drag <b>Green ambient</b> up in loopback: separation on the scope drops, the blu
     let name = "";
     let contentType;
     let set;
+    let encryption;
     let p = MANIFEST_CORE_BYTES;
     while (p + 1 < b.length) {
       const tag = b[p];
@@ -735,6 +765,9 @@ Drag <b>Green ambient</b> up in loopback: separation on the scope drops, the blu
             };
           }
           break;
+        case Tlv.Encryption:
+          if (len === 5) encryption = { suite: value[0], keyId: readU32BE(value, 1) };
+          break;
         default:
           break;
       }
@@ -748,7 +781,8 @@ Drag <b>Green ambient</b> up in loopback: separation on the scope drops, the blu
       fileCRC,
       name: name || "payload.bin",
       ...contentType !== void 0 ? { contentType } : {},
-      ...set !== void 0 ? { set } : {}
+      ...set !== void 0 ? { set } : {},
+      ...encryption !== void 0 ? { encryption } : {}
     };
   }
 
@@ -983,7 +1017,12 @@ Drag <b>Green ambient</b> up in loopback: separation on the scope drops, the blu
       this.geometry = geometry(opts.grid);
       this.encoder = new LTEncoder(payload2, this.geometry.symBytes);
       this.enhancement = opts.enhancement ?? true;
-      const name = opts.name ?? "payload.bin";
+      if (opts.encryption && (opts.name !== void 0 || opts.contentType !== void 0)) {
+        throw new TypeError(
+          "name and contentType must not be given alongside encryption: they would ride in the public manifest. Pass them to sealPayload() instead (SPEC.md \xA711.3)."
+        );
+      }
+      const name = opts.encryption ? "" : opts.name ?? "payload.bin";
       this.sessionId = deriveSessionId(
         this.encoder.fileCRC,
         this.encoder.total,
@@ -998,7 +1037,8 @@ Drag <b>Green ambient</b> up in loopback: separation on the scope drops, the blu
         fileCRC: this.encoder.fileCRC,
         name,
         ...opts.contentType !== void 0 ? { contentType: opts.contentType } : {},
-        ...opts.set !== void 0 ? { set: opts.set } : {}
+        ...opts.set !== void 0 ? { set: opts.set } : {},
+        ...opts.encryption !== void 0 ? { encryption: opts.encryption } : {}
       };
     }
     get frames() {
@@ -1490,6 +1530,231 @@ Drag <b>Green ambient</b> up in loopback: separation on the scope drops, the blu
     };
   }
 
+  // src/core/crypto.ts
+  var subtle = globalThis.crypto.subtle;
+  var CryptoSuite = {
+    /** HMAC-SHA-256 tag as synthetic IV, AES-256-CTR encryption. */
+    A256SIV_HS256: 1
+  };
+  var KEY_BYTES = 32;
+  var TAG_BYTES = 16;
+  var HKDF_MAC_INFO = "lumen-link/v2 siv-mac";
+  var HKDF_ENC_INFO = "lumen-link/v2 siv-enc";
+  var utf83 = new TextEncoder();
+  function isSupportedSuite(suite) {
+    return suite === CryptoSuite.A256SIV_HS256;
+  }
+  function generateKey() {
+    const key = new Uint8Array(KEY_BYTES);
+    globalThis.crypto.getRandomValues(key);
+    return key;
+  }
+  async function deriveSubkeys(master) {
+    if (master.length !== KEY_BYTES) {
+      throw new RangeError(`master key must be ${KEY_BYTES} bytes, got ${master.length}`);
+    }
+    const ikm = await subtle.importKey("raw", master, "HKDF", false, [
+      "deriveBits"
+    ]);
+    const derive = async (info) => new Uint8Array(
+      await subtle.deriveBits(
+        { name: "HKDF", hash: "SHA-256", salt: new Uint8Array(0), info: utf83.encode(info) },
+        ikm,
+        256
+      )
+    );
+    const [macBytes, encBytes] = await Promise.all([
+      derive(HKDF_MAC_INFO),
+      derive(HKDF_ENC_INFO)
+    ]);
+    const [mac, enc] = await Promise.all([
+      subtle.importKey("raw", macBytes, { name: "HMAC", hash: "SHA-256" }, false, [
+        "sign"
+      ]),
+      subtle.importKey("raw", encBytes, "AES-CTR", false, ["encrypt", "decrypt"])
+    ]);
+    return { mac, enc };
+  }
+  function lengthPrefixed(...parts) {
+    let total = 0;
+    for (const p of parts) total += 8 + p.length;
+    const out = new Uint8Array(total);
+    let o = 0;
+    for (const p of parts) {
+      const n = BigInt(p.length);
+      for (let i = 7; i >= 0; i--) out[o + i] = Number(n >> BigInt((7 - i) * 8) & 0xffn);
+      o += 8;
+      out.set(p, o);
+      o += p.length;
+    }
+    return out;
+  }
+  async function computeTag(keys, aad, plaintext) {
+    const input = lengthPrefixed(aad, plaintext);
+    const full = new Uint8Array(await subtle.sign("HMAC", keys.mac, input));
+    return full.subarray(0, TAG_BYTES);
+  }
+  function counterFromTag(tag) {
+    const counter = tag.slice(0, 16);
+    counter[8] &= 127;
+    counter[12] &= 127;
+    return counter;
+  }
+  function timingSafeEqual(a, b) {
+    if (a.length !== b.length) return false;
+    let diff = 0;
+    for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
+    return diff === 0;
+  }
+  function associatedData(suite, keyId) {
+    const aad = new Uint8Array(5);
+    aad[0] = suite & 255;
+    aad[1] = keyId >>> 24 & 255;
+    aad[2] = keyId >>> 16 & 255;
+    aad[3] = keyId >>> 8 & 255;
+    aad[4] = keyId & 255;
+    return aad;
+  }
+  async function seal(plaintext, key, keyId, suite = CryptoSuite.A256SIV_HS256) {
+    if (!isSupportedSuite(suite)) throw new RangeError(`unsupported suite ${suite}`);
+    const keys = await deriveSubkeys(key);
+    const tag = await computeTag(keys, associatedData(suite, keyId), plaintext);
+    const ciphertext = new Uint8Array(
+      await subtle.encrypt(
+        { name: "AES-CTR", counter: counterFromTag(tag), length: 32 },
+        keys.enc,
+        plaintext
+      )
+    );
+    const out = new Uint8Array(TAG_BYTES + ciphertext.length);
+    out.set(tag, 0);
+    out.set(ciphertext, TAG_BYTES);
+    return out;
+  }
+  async function open(envelope, key, keyId, suite = CryptoSuite.A256SIV_HS256) {
+    if (!isSupportedSuite(suite)) return null;
+    if (envelope.length < TAG_BYTES) return null;
+    const keys = await deriveSubkeys(key);
+    const tag = envelope.subarray(0, TAG_BYTES);
+    const ciphertext = envelope.subarray(TAG_BYTES);
+    const plaintext = new Uint8Array(
+      await subtle.decrypt(
+        { name: "AES-CTR", counter: counterFromTag(tag), length: 32 },
+        keys.enc,
+        ciphertext
+      )
+    );
+    const expected = await computeTag(keys, associatedData(suite, keyId), plaintext);
+    return timingSafeEqual(tag, expected) ? plaintext : null;
+  }
+
+  // src/core/envelope.ts
+  var INNER_VERSION = 1;
+  var InnerTlv = {
+    End: Tlv.End,
+    Name: Tlv.Name,
+    ContentType: Tlv.ContentType,
+    /** Milliseconds since the Unix epoch, u64be. */
+    Expires: 5
+  };
+  var utf84 = new TextEncoder();
+  var utf8Decode2 = new TextDecoder();
+  function packInnerHeader(meta) {
+    const parts = [];
+    const put = (tag, value) => {
+      if (value.length > 255) throw new RangeError(`inner TLV ${tag} too long`);
+      const buf = new Uint8Array(2 + value.length);
+      buf[0] = tag;
+      buf[1] = value.length;
+      buf.set(value, 2);
+      parts.push(buf);
+    };
+    if (meta.name) put(InnerTlv.Name, utf84.encode(meta.name));
+    if (meta.contentType) put(InnerTlv.ContentType, utf84.encode(meta.contentType));
+    if (meta.expiresAt !== void 0) {
+      const v = new Uint8Array(8);
+      const ms = BigInt(Math.max(0, Math.floor(meta.expiresAt)));
+      for (let i = 0; i < 8; i++) v[i] = Number(ms >> BigInt((7 - i) * 8) & 0xffn);
+      put(InnerTlv.Expires, v);
+    }
+    parts.push(new Uint8Array([InnerTlv.End]));
+    let length = 0;
+    for (const p of parts) length += p.length;
+    const out = new Uint8Array(3 + length);
+    out[0] = INNER_VERSION;
+    writeU16BE(out, 1, length);
+    let o = 3;
+    for (const p of parts) {
+      out.set(p, o);
+      o += p.length;
+    }
+    return out;
+  }
+  function parseInnerHeader(plaintext) {
+    if (plaintext.length < 3) return null;
+    if (plaintext[0] !== INNER_VERSION) return null;
+    const length = readU16BE(plaintext, 1);
+    const end = 3 + length;
+    if (end > plaintext.length) return null;
+    let name = "";
+    let contentType;
+    let expiresAt;
+    let p = 3;
+    while (p + 1 < end) {
+      const tag = plaintext[p];
+      if (tag === InnerTlv.End) break;
+      const len = plaintext[p + 1];
+      const start = p + 2;
+      if (start + len > end) return null;
+      const value = plaintext.subarray(start, start + len);
+      switch (tag) {
+        case InnerTlv.Name:
+          name = utf8Decode2.decode(value);
+          break;
+        case InnerTlv.ContentType:
+          contentType = utf8Decode2.decode(value);
+          break;
+        case InnerTlv.Expires:
+          if (len === 8) {
+            let ms = 0n;
+            for (let i = 0; i < 8; i++) ms = ms << 8n | BigInt(value[i]);
+            expiresAt = Number(ms);
+          }
+          break;
+        default:
+          break;
+      }
+      p = start + len;
+    }
+    return {
+      metadata: {
+        name: name || "payload.bin",
+        ...contentType !== void 0 ? { contentType } : {},
+        ...expiresAt !== void 0 ? { expiresAt } : {}
+      },
+      bodyOffset: end
+    };
+  }
+  async function sealPayload(file, meta, key, keyId, suite = CryptoSuite.A256SIV_HS256) {
+    const header = packInnerHeader(meta);
+    const plaintext = new Uint8Array(header.length + file.length);
+    plaintext.set(header, 0);
+    plaintext.set(file, header.length);
+    return seal(plaintext, key, keyId, suite);
+  }
+  async function openPayload(envelope, key, keyId, suite = CryptoSuite.A256SIV_HS256, now = Date.now()) {
+    const plaintext = await open(envelope, key, keyId, suite);
+    if (!plaintext) return null;
+    const parsed = parseInnerHeader(plaintext);
+    if (!parsed) return null;
+    const { metadata } = parsed;
+    return {
+      metadata,
+      bytes: plaintext.subarray(parsed.bodyOffset),
+      expired: metadata.expiresAt !== void 0 && now > metadata.expiresAt
+    };
+  }
+
   // src/demo/render.ts
   var GridRenderer = class {
     constructor(canvas) {
@@ -1639,15 +1904,26 @@ Drag <b>Green ambient</b> up in loopback: separation on the scope drops, the blu
   var payload = new TextEncoder().encode(DEMO_PAYLOADS[0].text);
   var payloadName = DEMO_PAYLOADS[0].name;
   var demoIndex = 0;
-  function buildTransmitter() {
+  var DEMO_KEY = generateKey();
+  var DECOY_KEY = generateKey();
+  var DEMO_KEY_ID = 1097950;
+  var encryptionOn = () => $("encSel").value === "1";
+  var receiverHasKey = () => $("keySel").value === "1";
+  async function buildTransmitter() {
     const grid = Number($("gridSel").value);
-    tx = new Transmitter(payload, {
-      grid,
-      name: payloadName,
-      enhancement: $("chromaSel").value === "1"
-    });
+    const enhancement = $("chromaSel").value === "1";
+    if (encryptionOn()) {
+      const sealed = await sealPayload(payload, { name: payloadName }, DEMO_KEY, DEMO_KEY_ID);
+      tx = new Transmitter(sealed, {
+        grid,
+        enhancement,
+        encryption: { suite: CryptoSuite.A256SIV_HS256, keyId: DEMO_KEY_ID }
+      });
+    } else {
+      tx = new Transmitter(payload, { grid, enhancement, name: payloadName });
+    }
     renderer.resize(grid);
-    $("txFile").textContent = payloadName;
+    $("txFile").textContent = encryptionOn() ? `\u{1F512} ${payloadName}` : payloadName;
     $("txSession").textContent = tx.sessionId.toString(16).padStart(8, "0");
     $("txK").textContent = String(tx.encoder.K);
     $("txSym").innerHTML = `${tx.geometry.symBytes}<small> B</small>`;
@@ -1693,7 +1969,7 @@ Drag <b>Green ambient</b> up in loopback: separation on the scope drops, the blu
     payload = new TextEncoder().encode(next.text);
     payloadName = next.name;
     $("fileIn").value = "";
-    buildTransmitter();
+    void buildTransmitter();
   };
   $("fileIn").onchange = (e) => {
     const file = e.target.files?.[0];
@@ -1701,11 +1977,11 @@ Drag <b>Green ambient</b> up in loopback: separation on the scope drops, the blu
     void file.arrayBuffer().then((buf) => {
       payload = new Uint8Array(buf);
       payloadName = file.name;
-      buildTransmitter();
+      return buildTransmitter();
     });
   };
-  for (const id of ["gridSel", "chromaSel"]) {
-    $(id).onchange = () => buildTransmitter();
+  for (const id of ["gridSel", "chromaSel", "encSel"]) {
+    $(id).onchange = () => void buildTransmitter();
   }
   $("fpsSel").onchange = () => {
     if (txTimer !== null) setTransmitting(true);
@@ -1813,12 +2089,45 @@ Drag <b>Green ambient</b> up in loopback: separation on the scope drops, the blu
     if (!rx) return;
     const { bytes, ok } = session.decoder.verify();
     const elapsed = ((performance.now() - rxStart) / 1e3).toFixed(1);
-    $("doneBox").style.display = "flex";
-    $("doneName").textContent = (ok ? "\u2713 " : "\u2717 checksum mismatch: ") + `${session.manifest.name}  \xB7  ${session.decoder.total} bytes  \xB7  ${rx.stats.framesSeen} frames  \xB7  ${elapsed} s`;
+    const stamp = `${session.decoder.total} bytes  \xB7  ${rx.stats.framesSeen} frames  \xB7  ${elapsed} s`;
+    const box = $("doneBox");
+    box.style.display = "flex";
+    if (!ok) {
+      box.classList.add("sealed");
+      $("doneName").textContent = `\u2717 checksum mismatch: ${session.manifest.name}  \xB7  ${stamp}`;
+      return;
+    }
+    const encryption = session.manifest.encryption;
+    if (!encryption) {
+      box.classList.remove("sealed");
+      $("doneName").textContent = `\u2713 ${session.manifest.name}  \xB7  ${stamp}`;
+      offerDownload(bytes, session.manifest.name);
+      return;
+    }
+    if (!isSupportedSuite(encryption.suite)) {
+      box.classList.add("sealed");
+      $("doneName").textContent = `\u{1F512} sealed with an unsupported suite (${encryption.suite})`;
+      offerDownload(bytes, "sealed.bin");
+      return;
+    }
+    const key = receiverHasKey() ? DEMO_KEY : DECOY_KEY;
+    void openPayload(bytes, key, encryption.keyId, encryption.suite).then((opened) => {
+      if (!opened) {
+        box.classList.add("sealed");
+        $("doneName").textContent = `\u{1F512} sealed \u2014 no key. Payload reassembled intact (${stamp}), and it is indistinguishable from random without the key.`;
+        offerDownload(bytes, "sealed.bin");
+        return;
+      }
+      box.classList.remove("sealed");
+      $("doneName").textContent = `\u2713 \u{1F513} ${opened.metadata.name}  \xB7  ${opened.bytes.length} bytes decrypted  \xB7  ${stamp}`;
+      offerDownload(opened.bytes, opened.metadata.name);
+    });
+  }
+  function offerDownload(bytes, name) {
     $("dlBtn").onclick = () => {
       const a = document.createElement("a");
       a.href = URL.createObjectURL(new Blob([bytes]));
-      a.download = session.manifest.name;
+      a.download = name;
       a.click();
       URL.revokeObjectURL(a.href);
     };
@@ -1876,7 +2185,10 @@ Drag <b>Green ambient</b> up in loopback: separation on the scope drops, the blu
     el.oninput = update;
     update();
   }
-  buildTransmitter();
+  $("keySel").onchange = () => {
+    if (mode !== null) startReceive(mode);
+  };
+  void buildTransmitter();
 })();
 
 </script>

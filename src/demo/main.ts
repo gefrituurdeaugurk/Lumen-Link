@@ -8,6 +8,8 @@ import { geometry } from "../core/geometry.ts";
 import { Transmitter } from "../core/transmitter.ts";
 import { Receiver } from "../receiver.ts";
 import { CHROMA_FLOOR } from "../vision/decode.ts";
+import { CryptoSuite, generateKey, isSupportedSuite } from "../core/crypto.ts";
+import { openPayload, sealPayload } from "../core/envelope.ts";
 import type { Session } from "../core/session.ts";
 import { GridRenderer, drawLockOverlay, drawScope, SCOPE_SLOTS, type ScopeEntry } from "./render.ts";
 import { LoopbackCamera } from "./loopback.ts";
@@ -47,16 +49,34 @@ let payload = new TextEncoder().encode(DEMO_PAYLOADS[0].text);
 let payloadName = DEMO_PAYLOADS[0].name;
 let demoIndex = 0;
 
-function buildTransmitter(): void {
+// A demo key, generated per page load. A real deployment distributes this out
+// of band — printed at the door, in an app login, over a prior channel.
+const DEMO_KEY = generateKey();
+const DECOY_KEY = generateKey();
+const DEMO_KEY_ID = 0x10c0de;
+
+const encryptionOn = () => $<HTMLSelectElement>("encSel").value === "1";
+const receiverHasKey = () => $<HTMLSelectElement>("keySel").value === "1";
+
+async function buildTransmitter(): Promise<void> {
   const grid = Number($<HTMLSelectElement>("gridSel").value);
-  tx = new Transmitter(payload, {
-    grid,
-    name: payloadName,
-    enhancement: $<HTMLSelectElement>("chromaSel").value === "1",
-  });
+  const enhancement = $<HTMLSelectElement>("chromaSel").value === "1";
+
+  if (encryptionOn()) {
+    // Seal before the fountain sees it. Name and content type ride inside the
+    // envelope, so the public manifest gives them away to nobody.
+    const sealed = await sealPayload(payload, { name: payloadName }, DEMO_KEY, DEMO_KEY_ID);
+    tx = new Transmitter(sealed, {
+      grid,
+      enhancement,
+      encryption: { suite: CryptoSuite.A256SIV_HS256, keyId: DEMO_KEY_ID },
+    });
+  } else {
+    tx = new Transmitter(payload, { grid, enhancement, name: payloadName });
+  }
 
   renderer.resize(grid);
-  $("txFile").textContent = payloadName;
+  $("txFile").textContent = encryptionOn() ? `🔒 ${payloadName}` : payloadName;
   $("txSession").textContent = tx.sessionId.toString(16).padStart(8, "0");
   $("txK").textContent = String(tx.encoder.K);
   $("txSym").innerHTML = `${tx.geometry.symBytes}<small> B</small>`;
@@ -108,7 +128,7 @@ $("swapBtn").onclick = () => {
   payload = new TextEncoder().encode(next.text);
   payloadName = next.name;
   $<HTMLInputElement>("fileIn").value = "";
-  buildTransmitter();
+  void buildTransmitter();
 };
 
 $<HTMLInputElement>("fileIn").onchange = (e) => {
@@ -117,12 +137,12 @@ $<HTMLInputElement>("fileIn").onchange = (e) => {
   void file.arrayBuffer().then((buf) => {
     payload = new Uint8Array(buf);
     payloadName = file.name;
-    buildTransmitter();
+    return buildTransmitter();
   });
 };
 
-for (const id of ["gridSel", "chromaSel"]) {
-  $<HTMLSelectElement>(id).onchange = () => buildTransmitter();
+for (const id of ["gridSel", "chromaSel", "encSel"]) {
+  $<HTMLSelectElement>(id).onchange = () => void buildTransmitter();
 }
 $<HTMLSelectElement>("fpsSel").onchange = () => {
   if (txTimer !== null) setTransmitting(true);
@@ -267,17 +287,57 @@ function present(session: Session): void {
   if (!rx) return;
   const { bytes, ok } = session.decoder.verify();
   const elapsed = ((performance.now() - rxStart) / 1000).toFixed(1);
+  const stamp = `${session.decoder.total} bytes  ·  ${rx.stats.framesSeen} frames  ·  ${elapsed} s`;
 
-  $("doneBox").style.display = "flex";
-  $("doneName").textContent =
-    (ok ? "✓ " : "✗ checksum mismatch: ") +
-    `${session.manifest.name}  ·  ${session.decoder.total} bytes  ·  ` +
-    `${rx.stats.framesSeen} frames  ·  ${elapsed} s`;
+  const box = $("doneBox");
+  box.style.display = "flex";
 
+  if (!ok) {
+    box.classList.add("sealed");
+    $("doneName").textContent = `✗ checksum mismatch: ${session.manifest.name}  ·  ${stamp}`;
+    return;
+  }
+
+  const encryption = session.manifest.encryption;
+  if (!encryption) {
+    box.classList.remove("sealed");
+    $("doneName").textContent = `✓ ${session.manifest.name}  ·  ${stamp}`;
+    offerDownload(bytes, session.manifest.name);
+    return;
+  }
+
+  // The suite id came off the wire, so it is not trusted until checked.
+  if (!isSupportedSuite(encryption.suite)) {
+    box.classList.add("sealed");
+    $("doneName").textContent = `🔒 sealed with an unsupported suite (${encryption.suite})`;
+    offerDownload(bytes, "sealed.bin");
+    return;
+  }
+
+  // Reassembly succeeded — the read was perfect. Whether that yields anything
+  // is a separate question, answered only by holding the key.
+  const key = receiverHasKey() ? DEMO_KEY : DECOY_KEY;
+  void openPayload(bytes, key, encryption.keyId, encryption.suite).then((opened) => {
+    if (!opened) {
+      box.classList.add("sealed");
+      $("doneName").textContent =
+        `🔒 sealed — no key. Payload reassembled intact (${stamp}), and it is ` +
+        `indistinguishable from random without the key.`;
+      offerDownload(bytes, "sealed.bin");
+      return;
+    }
+    box.classList.remove("sealed");
+    $("doneName").textContent =
+      `✓ 🔓 ${opened.metadata.name}  ·  ${opened.bytes.length} bytes decrypted  ·  ${stamp}`;
+    offerDownload(opened.bytes, opened.metadata.name);
+  });
+}
+
+function offerDownload(bytes: Uint8Array, name: string): void {
   $("dlBtn").onclick = () => {
     const a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([bytes as BlobPart]));
-    a.download = session.manifest.name;
+    a.download = name;
     a.click();
     URL.revokeObjectURL(a.href);
   };
@@ -343,4 +403,8 @@ for (const [input, label] of [
   update();
 }
 
-buildTransmitter();
+$<HTMLSelectElement>("keySel").onchange = () => {
+  if (mode !== null) startReceive(mode);
+};
+
+void buildTransmitter();

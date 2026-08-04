@@ -32,12 +32,25 @@ export const Tlv = {
   Set: 3,
   /** Reserved: detached signature over the core record. Not yet defined. */
   Signature: 4,
+  /** suite u8, keyId u32 — the payload is a sealed envelope (SPEC.md §11). */
+  Encryption: 5,
 } as const;
 
 export interface SetMembership {
   readonly setId: number;
   readonly objIndex: number;
   readonly objCount: number;
+}
+
+/**
+ * Marks the payload as encrypted and says which key opens it. Deliberately
+ * tiny — 5 bytes of value, 7 with framing — so it fits even the 13 spare
+ * manifest bytes a 48x48 grid leaves. Anything larger, such as a per-recipient
+ * wrapped key, belongs in the payload rather than here (SPEC.md §11.4).
+ */
+export interface EncryptionInfo {
+  readonly suite: number;
+  readonly keyId: number;
 }
 
 export interface Manifest {
@@ -49,6 +62,9 @@ export interface Manifest {
   readonly name: string;
   readonly contentType?: string;
   readonly set?: SetMembership;
+  /** Present when the payload is a sealed envelope. In that case `name` and
+   *  `contentType` are absent here and live inside the envelope instead. */
+  readonly encryption?: EncryptionInfo;
 }
 
 const utf8 = new TextEncoder();
@@ -83,7 +99,16 @@ export function packManifest(m: Manifest, size: number): Uint8Array {
     p += value.length;
   };
 
-  // Set membership first: without it a receiver cannot tell where an object
+  // Encryption first: without it a receiver cannot even tell that what it
+  // reassembled needs opening, and it is the smallest extension there is.
+  if (m.encryption) {
+    const v = new Uint8Array(5);
+    v[0] = m.encryption.suite & 0xff;
+    writeU32BE(v, 1, m.encryption.keyId);
+    put(Tlv.Encryption, v);
+  }
+
+  // Set membership next: without it a receiver cannot tell where an object
   // sits in a loop, and it is a fixed small cost.
   if (m.set && m.set.objCount > 1) {
     const v = new Uint8Array(8);
@@ -132,6 +157,7 @@ export function parseManifest(b: Uint8Array): Manifest | null {
   let name = "";
   let contentType: string | undefined;
   let set: SetMembership | undefined;
+  let encryption: EncryptionInfo | undefined;
 
   let p = MANIFEST_CORE_BYTES;
   while (p + 1 < b.length) {
@@ -158,6 +184,9 @@ export function parseManifest(b: Uint8Array): Manifest | null {
           };
         }
         break;
+      case Tlv.Encryption:
+        if (len === 5) encryption = { suite: value[0], keyId: readU32BE(value, 1) };
+        break;
       default:
         break; // unknown tags are skipped, by design
     }
@@ -173,5 +202,6 @@ export function parseManifest(b: Uint8Array): Manifest | null {
     name: name || "payload.bin",
     ...(contentType !== undefined ? { contentType } : {}),
     ...(set !== undefined ? { set } : {}),
+    ...(encryption !== undefined ? { encryption } : {}),
   };
 }
