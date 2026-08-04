@@ -8,6 +8,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { geometry, STANDARD_GRIDS } from "../src/core/geometry.ts";
+import { calibrationPatchWidth } from "../src/core/raster.ts";
 import { Transmitter } from "../src/core/transmitter.ts";
 import { Receiver } from "../src/receiver.ts";
 import { CHROMA_FLOOR } from "../src/vision/decode.ts";
@@ -104,6 +105,50 @@ test("the enhancement layer contributes when the blue axis separates", () => {
     withChroma.frames < withoutChroma.frames,
     `enhancement should reduce frames: ${withChroma.frames} vs ${withoutChroma.frames}`,
   );
+});
+
+test("monochrome mode keeps every band cell on black or white", () => {
+  const tx = new Transmitter(randomBytes(600, 61), {
+    grid: 64,
+    name: "mono.bin",
+    enhancement: false,
+  });
+  const { grid } = tx.next();
+
+  // Palette index is luma + 2*blue, so only 0 (black) and 3 (white) use the
+  // full luma range. Forcing the blue plane to a constant would leave blue
+  // (2) or yellow (1) on the grid and waste the margin this mode buys.
+  const seen = new Set<number>();
+  for (let y = 8; y < 64 - 8; y++) {
+    for (let x = 0; x < 64; x++) {
+      const i = y * 64 + x;
+      seen.add(grid.luma[i] + 2 * grid.blue[i]);
+    }
+  }
+  assert.deepEqual([...seen].sort(), [0, 3], "band region must be black and white only");
+
+  // The strip lives outside the band region and must keep all four references,
+  // or the receiver's thresholds move (SPEC.md §2.4).
+  const cw = calibrationPatchWidth(64);
+  const patches = [0, 1, 2, 3].map((k) => {
+    const i = 3 * 64 + (9 + k * cw + 1);
+    return grid.luma[i] + 2 * grid.blue[i];
+  });
+  assert.deepEqual(patches, [0, 2, 1, 3], "calibration strip stays black, blue, yellow, white");
+});
+
+test("monochrome mode converges under noise that defeats four colours", () => {
+  const payload = randomBytes(1800, 5);
+
+  // Blue sits at luma ~56 against a ~135 threshold, so four-colour mode has a
+  // worst-case margin of ~79 levels against monochrome's ~120. At this noise
+  // amplitude that difference is the whole ballgame.
+  const four = run(payload, "noisy.bin", 64, { noise: 100 }, { enhancement: true });
+  assert.ok(!four.verified, "four-colour mode is expected to fail this hard");
+
+  const mono = run(payload, "noisy.bin", 64, { noise: 100 }, { enhancement: false });
+  assert.ok(mono.verified, "monochrome mode should still converge");
+  assert.deepEqual(mono.bytes, payload);
 });
 
 test("a green ambient collapses the enhancement layer but not the base layer", () => {

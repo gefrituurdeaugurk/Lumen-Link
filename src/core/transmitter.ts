@@ -12,9 +12,9 @@ import { LTEncoder } from "./lt.ts";
 import { packManifest, type Manifest, type SetMembership } from "./manifest.ts";
 import { deriveSessionId, shortId } from "./session.ts";
 import {
+  collapseToMonochrome,
   createGrid,
   drawQuietStructure,
-  fillChromaPlane,
   writeChromaPlane,
   writeLumaBand,
   type CellGrid,
@@ -25,7 +25,8 @@ export const MANIFEST_INTERVAL = 4;
 
 export interface TransmitterOptions {
   readonly grid: number;
-  /** Blue-axis enhancement layer. */
+  /** Blue-axis enhancement layer. Off collapses the band region to black and
+   *  white: one symbol per frame cheaper, but a far wider luma margin. */
   readonly enhancement?: boolean;
   readonly name?: string;
   readonly contentType?: string;
@@ -127,7 +128,7 @@ export class Transmitter {
       );
       writeChromaPlane(grid, geo, bits);
     } else {
-      fillChromaPlane(grid);
+      collapseToMonochrome(grid);
     }
 
     const stats: FrameStats = { symbols, frameIndex: this.frameIndex, manifestSent };

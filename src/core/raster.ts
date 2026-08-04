@@ -102,11 +102,27 @@ export function writeChromaPlane(g: CellGrid, geo: Geometry, bits: BitPlane): vo
   }
 }
 
-/** Force the blue plane on across the band region, collapsing the palette to
- *  pure black/white. Used when the enhancement layer is disabled. */
-export function fillChromaPlane(g: CellGrid): void {
+/**
+ * Collapse the band region to pure black and white, for when the enhancement
+ * layer is off.
+ *
+ * The blue plane has to *mirror* luma here, not be forced to a constant.
+ * Palette index is `luma + 2 * blue`, so a constant 1 yields blue and white
+ * (indices 2 and 3) and a constant 0 yields black and yellow (0 and 1) —
+ * either way a mid-luma colour stays on the grid and the luma decision keeps
+ * the narrow margin the mode exists to widen. Mirroring lands every band cell
+ * on index 0 or 3, which is the full luma range.
+ *
+ * Must run after the luma bands are written. The calibration strip sits
+ * outside the band region and still carries all four extremes, so the
+ * receiver's thresholds are derived exactly as in four-colour mode.
+ */
+export function collapseToMonochrome(g: CellGrid): void {
   for (let y = 8; y < g.W - 8; y++) {
-    for (let x = 0; x < g.W; x++) g.blue[y * g.W + x] = 1;
+    for (let x = 0; x < g.W; x++) {
+      const i = y * g.W + x;
+      g.blue[i] = g.luma[i];
+    }
   }
 }
 

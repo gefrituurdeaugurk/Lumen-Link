@@ -29,6 +29,31 @@ worth doing:
   swap back and a partly received one resumes where it left off.
 - Drag **Green ambient** up. Blue-axis separation collapses, the enhancement
   layer drops out on its own, and the base layer keeps converging.
+- Switch **Enhancement layer** off. The grid collapses to black and white:
+  one symbol per frame cheaper, ~50% more luma margin. See below.
+
+## Monochrome mode
+
+Setting `enhancement: false` on the transmitter drops the blue plane and runs
+the band region in black and white alone. It needs no wire change and no
+receiver change — a symbol that was never sent looks exactly like one the
+receiver missed, which a fountain handles by design.
+
+The trade is better than "half the bits": the blue plane carries **one**
+symbol at 2×2 pitch against four luma bands, so dropping it costs a fifth of
+the frame. What it buys is margin. Palette index is `luma + 2 × blue`, so
+blue sits at luma ≈ 56 against a threshold of ≈ 135 — the worst-case luma
+margin in four-colour mode is ~79 levels. With only black and white on the
+grid it is ~120. In the headless pipeline that is the difference between
+failing and converging at a noise amplitude of 100.
+
+The margin only materialises if the blue plane **mirrors** luma. Forcing it to
+a constant gives blue/white or black/yellow, either of which leaves a mid-luma
+colour on the grid and yields no gain at all. See [SPEC.md §2.5](SPEC.md).
+
+Worth reaching for on long throws, under coloured ambient, on monochrome or
+e-ink panels, and for grids that will be screenshotted — JPEG 4:2:0 chroma
+subsampling wrecks the blue plane while luma survives.
 
 Camera capture is often blocked in a sandboxed frame; save the page and open
 it from disk if the camera button errors.

@@ -86,6 +86,37 @@ Rows 1–6, columns 9 onward, carry all four palette extremes in the order
 transmitted **every frame**; receivers **MUST NOT** cache calibration across
 frames, because auto-exposure and auto white balance move continuously.
 
+### 2.5 Monochrome mode
+
+A transmitter **MAY** drop the enhancement layer and run the band region in
+black and white alone. This is transmitter policy, not a format change: it
+emits no band `8`, and no signalling is required, because a symbol that was
+never sent is indistinguishable from one the receiver failed to catch — which
+a fountain already treats as the ordinary case.
+
+When the enhancement layer is dropped, the blue plane across the band region
+**MUST** mirror the luma plane, placing every band cell on palette index 0 or
+3. Forcing the plane to a constant instead leaves a mid-luma colour on the
+grid — blue at index 2, or yellow at index 1 — and keeps the narrow luma
+margin the mode exists to widen. Against the §8.3 threshold, measured on the
+palette above:
+
+| mode | band-region colours | worst-case luma margin |
+|---|---|---|
+| four-colour | black, yellow, blue, white | ~79 levels (blue is the limiter) |
+| constant blue plane | blue, white | ~79 levels — no gain |
+| monochrome (mirrored) | black, white | ~120 levels |
+
+The calibration strip (§2.4) sits outside the band region and **MUST** still
+carry all four extremes, so thresholds are derived exactly as in four-colour
+mode and no receiver change is needed.
+
+The cost is one symbol per frame out of five, not half the rate — the blue
+plane carries a single symbol at 2×2 pitch against four luma bands. In
+conditions bad enough to want this mode the receiver is already discarding
+that symbol under the §8.3 floor, so the throughput cost approaches zero
+exactly where the margin is worth the most.
+
 ---
 
 ## 3. Band framing

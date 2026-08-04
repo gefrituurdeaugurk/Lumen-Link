@@ -61,7 +61,7 @@ export {
   calibrationPatchWidth,
   createGrid,
   drawQuietStructure,
-  fillChromaPlane,
+  collapseToMonochrome,
   writeChromaPlane,
   writeLumaBand,
   type CellGrid,

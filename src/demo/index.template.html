@@ -160,8 +160,8 @@ button:focus-visible,select:focus-visible,input:focus-visible{outline:3px solid 
       <div class="field">
         <label for="chromaSel">Enhancement layer</label>
         <select id="chromaSel">
-          <option value="1" selected>on (blue axis)</option>
-          <option value="0">off (luma only)</option>
+          <option value="1" selected>on (four colours)</option>
+          <option value="0">off (black/white only)</option>
         </select>
       </div>
       <div class="field" style="flex:0 0 auto">
@@ -256,6 +256,8 @@ button:focus-visible,select:focus-visible,input:focus-visible{outline:3px solid 
 <b>What to measure.</b> Band pass rate is your rolling-shutter tear rate plus read errors: four independent bands per frame means a tear costs you one symbol, not the whole frame.
 Chroma pass tracks separately, so you can watch the enhancement layer fall away on its own while the base layer keeps converging.
 Drag <b>Green ambient</b> up in loopback: separation on the scope drops, the blue bar stops filling, the yellow one does not. That is the layering doing its job.
+<br><br>
+<b>Trade rate for reach.</b> Switch <b>Enhancement layer</b> off and the band region collapses to black and white. It costs one symbol per frame out of five — not half the rate, since the blue plane carries a single symbol at 2×2 pitch against four luma bands — and buys about 50% more luma margin, because blue at index 2 no longer has to stay on the right side of the threshold. Worth it for long throws, coloured ambient, monochrome panels, or grids that will be screenshotted through JPEG chroma subsampling. Push <b>Sensor noise</b>, <b>Defocus</b> and <b>Green ambient</b> up together until the base layer starts failing, then switch the enhancement layer off: the same conditions decode again, slower.
 <br><br>
 <b>Try the session layer.</b> Start a transfer, then hit <b>Swap payload</b> partway through. The receiver reports the new object rather than mixing the two, and each file keeps its own progress — swap back and a partly received one resumes where it left off instead of restarting. See <b>SPEC.md §4</b> for why identity, not begin/end markers, is the right primitive for a broadcast fountain.
 <br><br>
