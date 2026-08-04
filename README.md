@@ -81,9 +81,40 @@ Also in this version:
 - **Bounded sizes.** `K ≤ 8192` keeps at least 8× fountain overhead against
   the 16-bit ESI space; larger payloads segment across sessions.
 
+## Encrypted payloads (optional)
+
+A transmission can be sealed so only key-holders can read it. Encryption is a
+payload transform — the grid, framing, whitening, fountain and session routing
+stay exactly as they are and stay public:
+
+```ts
+const key = generateKey();                       // 32 bytes, distributed out of band
+const sealed = await sealPayload(file, { name: "confidential.pdf" }, key, keyId);
+const tx = new Transmitter(sealed, { grid: 64, encryption: { suite: 1, keyId } });
+
+// receiver
+const opened = await openPayload(session.decoder.verify().bytes, key, keyId);
+// → null without the right key
+```
+
+Notes on the design, in [SPEC.md §11](SPEC.md):
+
+- **Deterministic (SIV) encryption**, so loop accumulation survives. A random
+  per-transmission nonce would change the ciphertext, change the session id,
+  and force receivers to restart from zero on every loop pass.
+- **Name and content type move inside the envelope.** A public manifest
+  announcing `salaries-2026.xlsx` defeats the point; the transmitter throws if
+  you try to set them alongside encryption.
+- **`fileCRC` covers the ciphertext**, so reassembly is verifiable without the
+  key and no checksum of the plaintext is published.
+- The `ENCRYPTION` marker is 5 bytes, small enough for even a 48×48 manifest.
+
 ## Not implemented
 
-CRC-32 is not a MAC. Anyone who can display a grid can transmit a session a
-receiver will accept. The manifest reserves a `SIGNATURE` field, but its
-format is unspecified and nothing produces or checks one — do not treat a
-received payload as authenticated. See [SPEC.md §9](SPEC.md).
+**CRC-32 is not a MAC**, and encryption gives confidentiality, not authenticity
+of origin — anyone can still display a grid. The manifest reserves a
+`SIGNATURE` field, but its format is unspecified and nothing produces or checks
+one. Replay is not addressed; `EXPIRES` inside a sealed envelope is advisory
+only. Per-recipient key wrapping (HPKE) is specified as an extension point but
+not built. See [SPEC.md §9 and §11.5–11.6](SPEC.md) for what is and is not
+covered.

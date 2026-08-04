@@ -367,11 +367,13 @@ accept, under any name and content type it likes.
 The `SIGNATURE` TLV (tag 4) is reserved for a detached signature over the
 manifest core, but **its format is not yet specified and no implementation
 produces or checks one**. Until it is, deployments **MUST NOT** treat a
-received payload as authenticated, and receivers **SHOULD NOT** act on
-`CONTENT_TYPE` in ways that assume trusted input.
+received payload as authenticated on the basis of the manifest alone.
 
-Whitening (§3.4) provides no confidentiality; anything requiring it must be
-encrypted before being handed to the transmitter.
+Whitening (§3.4) provides no confidentiality. Payload confidentiality is
+available as an optional layer — see §11 — which also provides authenticity
+of the payload under the encrypting key. Receivers **SHOULD NOT** act on
+`CONTENT_TYPE` in ways that assume trusted input unless it came from inside a
+sealed envelope (§11.3).
 
 ---
 
@@ -384,4 +386,158 @@ file from the next, and a mid-transfer switch silently corrupted the
 in-flight decode.
 
 Forward-compatible extension points: `type` values 3–15, `band` values 4–7
-and 9–15, and manifest TLV tags 5+.
+and 9–15, and manifest TLV tags 6+.
+
+Encryption (§11) is optional and additive: a receiver that ignores the
+`ENCRYPTION` TLV reassembles the payload correctly and simply cannot open it.
+
+---
+
+## 11. Payload encryption (optional)
+
+### 11.1 Layering
+
+Encryption applies to the **payload**, not the optical layer. The grid,
+framing, whitening, fountain code and session routing are unchanged and
+remain fully public.
+
+This is deliberate. Whitening (§3.4) **MUST** stay public, because
+un-whitening happens before the header parse — a secret mask would leave
+receivers unable to find the header at all. The manifest **MUST** stay
+readable, or nothing can bootstrap. And the code is on a screen in a public
+place: concealing its structure would be obscurity, not security. The only
+real protection is that the plaintext is computationally inaccessible.
+
+```
+file → [inner header ‖ file] → seal → [tag ‖ ciphertext] → fountain → grid
+                                       └──── the payload ────┘
+```
+
+Encryption **MUST** be applied before fountain encoding. Fountain symbols are
+XORs of source blocks and the decoder XORs them during peeling, so encrypting
+individual symbols would break that algebra. A consequence is that an object
+decrypts as a single unit — acceptable, since all `K` blocks are needed
+anyway.
+
+### 11.2 Cipher suite
+
+| id | name | construction |
+|---|---|---|
+| 1 | `A256SIV-HS256` | HMAC-SHA-256 synthetic IV, AES-256-CTR |
+
+Suite 1, given a 32-byte master key `K`:
+
+```
+K_mac = HKDF-SHA256(K, salt = "", info = "lumen-link/v2 siv-mac", 32)
+K_enc = HKDF-SHA256(K, salt = "", info = "lumen-link/v2 siv-enc", 32)
+
+aad   = suite:u8 ‖ keyId:u32be
+V     = HMAC-SHA256(K_mac, u64be(|aad|) ‖ aad ‖ u64be(|P|) ‖ P)[0..16]
+Q     = V with bits 31 and 63 (counting from the right) cleared
+C     = AES-256-CTR(K_enc, counter = Q, counter length = 32 bits, P)
+
+envelope = V ‖ C
+```
+
+The tag **is** the IV. To open, CTR-decrypt with `Q`, recompute `V` over the
+recovered plaintext, and compare in constant time; a mismatch **MUST** be
+reported as failure with no plaintext returned.
+
+This is SIV-*style*, not RFC 5297 on the wire — it uses HMAC over a
+length-prefixed encoding rather than S2V/CMAC. Do not expect interop with an
+RFC 5297 implementation. The bit-clearing in `Q` follows RFC 5297 so that
+counter increments over a long message cannot carry into the upper block.
+
+**Why deterministic.** Session ids are content-derived so that a playlist
+cycling A → B → C → A lets a receiver finish A on the second pass (§4.1). A
+random per-transmission nonce would change the ciphertext, change the session
+id, and force every receiver to restart from zero on each loop — destroying
+the property the id design exists for. Deriving the IV from the plaintext also
+enforces nonce safety automatically: edit the file and the IV necessarily
+changes, so one counter can never cover two plaintexts under one key.
+
+Deterministic encryption leaks that two transmissions carry the same object.
+The content-derived session id already leaks exactly that, so nothing is
+given up.
+
+### 11.3 Envelope and inner header
+
+The sealed plaintext is an inner header followed by the file:
+
+```
+0      version (1)
+1–2    header length, u16be
+3..    TLVs, terminated by tag 0
+then   file bytes
+```
+
+Inner TLVs share the manifest tag registry (§5.2): `NAME` (1),
+`CONTENT_TYPE` (2), `EXPIRES` (5, milliseconds since the Unix epoch, u64be).
+
+In encrypted mode, `NAME` and `CONTENT_TYPE` **MUST** be omitted from the
+public manifest and carried here instead. A manifest announcing
+`salaries-2026.xlsx` defeats the purpose of encrypting its contents.
+Implementations **SHOULD** reject an attempt to set them alongside encryption
+rather than silently leaking.
+
+`EXPIRES` is advisory metadata for the receiving application, not an
+enforcement mechanism; a receiver holding the key can always ignore it.
+
+### 11.4 Signalling and key distribution
+
+Manifest TLV tag 5, `ENCRYPTION`, 5 bytes:
+
+| offset | field |
+|---|---|
+| 0 | suite id, u8 |
+| 1–4 | `keyId`, u32be |
+
+Deliberately tiny, so it fits the 13 spare manifest bytes a 48×48 grid leaves.
+Encryption and `SET` together do **not** fit at 48×48; encrypted multi-object
+sets need 64×64 or larger.
+
+`keyId` names the key without revealing it, and is bound into the tag so a
+ciphertext cannot be replayed under a different key id.
+
+Key distribution is out of band and deployment-specific:
+
+| approach | fits | cost |
+|---|---|---|
+| pre-shared key | one trust group: conference handout, retail loop | trivial; any leaked receiver compromises all future traffic |
+| HPKE (RFC 9180) per recipient | named recipients, revocation | ~80 B of wrapped key per recipient |
+| passphrase + Argon2id | "type the code on screen" | offline brute force is unlimited; needs real entropy |
+
+**Extension point.** Per-recipient wrapped keys **MUST NOT** be placed in the
+manifest — a single wrapped X25519 key is roughly 80 bytes and does not fit at
+any grid size. They belong at the head of the *payload*, before the envelope,
+where they are fountain-coded like everything else and cost bandwidth rather
+than manifest space. This is not yet specified.
+
+### 11.5 What encryption does not hide
+
+Encrypting the payload does not make a transmission private. An observer
+still learns:
+
+- **Size.** `total` is public and is a fingerprint. Pad if it matters.
+- **Timing and recurrence** — when a transmission starts, how long it runs,
+  and whether the same object recurs in a loop.
+- **Session id as a content fingerprint.** Anyone holding a candidate
+  ciphertext can compute its id and confirm a match. Inherent to §4.1.
+- **Name and content type**, unless moved inside the envelope per §11.3.
+
+### 11.6 What encryption does not provide
+
+**Authenticity of origin.** Anyone can display a grid. Under a pre-shared key,
+a valid tag does imply *someone holding the key* produced the envelope. Under
+a future public-key mode, anyone can encrypt to a recipient, so deployments
+needing origin authenticity **MUST** sign as well — sign-then-encrypt, via the
+reserved `SIGNATURE` TLV (§9), which remains unspecified.
+
+**Replay protection.** A recorded transmission can be re-displayed
+indefinitely. `EXPIRES` (§11.3) is the only mitigation offered and it is
+advisory.
+
+`fileCRC` (§5.1) covers the **ciphertext**, not the plaintext. This lets a
+receiver verify reassembly before attempting decryption, and avoids
+publishing a checksum of the plaintext — which would let an observer holding
+a candidate file confirm its contents outright.

@@ -9,7 +9,12 @@
 import { geometry, NBANDS, type Geometry } from "./geometry.ts";
 import { CHROMA_BAND, FrameType, packBand } from "./framing.ts";
 import { LTEncoder } from "./lt.ts";
-import { packManifest, type Manifest, type SetMembership } from "./manifest.ts";
+import {
+  packManifest,
+  type EncryptionInfo,
+  type Manifest,
+  type SetMembership,
+} from "./manifest.ts";
 import { deriveSessionId, shortId } from "./session.ts";
 import {
   createGrid,
@@ -32,6 +37,14 @@ export interface TransmitterOptions {
   readonly set?: SetMembership;
   /** Perturbs the session id so a playlist can avoid sid8 collisions. */
   readonly nonce?: number;
+  /**
+   * Declares that `payload` is already a sealed envelope (see envelope.ts).
+   * The transmitter does not encrypt — sealing happens before construction,
+   * because encryption is a payload transform and everything here stays
+   * public. When set, `name` and `contentType` must be omitted: they belong
+   * inside the envelope, not in a manifest anyone can read.
+   */
+  readonly encryption?: EncryptionInfo;
 }
 
 export interface FrameStats {
@@ -56,7 +69,17 @@ export class Transmitter {
     this.encoder = new LTEncoder(payload, this.geometry.symBytes);
     this.enhancement = opts.enhancement ?? true;
 
-    const name = opts.name ?? "payload.bin";
+    if (opts.encryption && (opts.name !== undefined || opts.contentType !== undefined)) {
+      throw new TypeError(
+        "name and contentType must not be given alongside encryption: they would ride in " +
+          "the public manifest. Pass them to sealPayload() instead (SPEC.md §11.3).",
+      );
+    }
+
+    // In encrypted mode the name is not public, so it cannot contribute to the
+    // session id. The id stays stable across loop passes anyway, because the
+    // sealed envelope it is derived from is deterministic.
+    const name = opts.encryption ? "" : (opts.name ?? "payload.bin");
     this.sessionId = deriveSessionId(
       this.encoder.fileCRC,
       this.encoder.total,
@@ -72,6 +95,7 @@ export class Transmitter {
       name,
       ...(opts.contentType !== undefined ? { contentType: opts.contentType } : {}),
       ...(opts.set !== undefined ? { set: opts.set } : {}),
+      ...(opts.encryption !== undefined ? { encryption: opts.encryption } : {}),
     };
   }
 

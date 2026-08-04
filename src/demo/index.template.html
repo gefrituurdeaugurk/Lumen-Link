@@ -115,6 +115,8 @@ button:focus-visible,select:focus-visible,input:focus-visible{outline:3px solid 
 .err{font-family:var(--mono);font-size:11px;color:var(--paper);background:var(--sig-blue);padding:7px 9px;margin-top:9px;display:none}
 .done{background:var(--sig-yellow);border:2px solid var(--ink);padding:10px;margin-top:12px;display:none;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
 .done .fn{font-family:var(--mono);font-size:11.5px;font-weight:600;word-break:break-all}
+.done.sealed{background:var(--ink);color:var(--paper)}
+.done.sealed button{background:var(--paper);color:var(--ink);border-color:var(--paper)}
 </style>
 </head>
 <body>
@@ -164,6 +166,16 @@ button:focus-visible,select:focus-visible,input:focus-visible{outline:3px solid 
           <option value="0">off (luma only)</option>
         </select>
       </div>
+      <div class="field">
+        <label for="encSel">Encryption</label>
+        <select id="encSel">
+          <option value="0" selected>off</option>
+          <option value="1">on (demo key)</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="row">
       <div class="field" style="flex:0 0 auto">
         <label>&nbsp;</label>
         <button id="txBtn">Start transmit</button>
@@ -204,6 +216,13 @@ button:focus-visible,select:focus-visible,input:focus-visible{outline:3px solid 
       <div class="field" style="flex:0 0 auto">
         <label>&nbsp;</label>
         <button id="rxStop" class="ghost" disabled>Stop</button>
+      </div>
+      <div class="field" style="flex:1 1 130px">
+        <label for="keySel">Decryption key</label>
+        <select id="keySel">
+          <option value="1" selected>receiver has it</option>
+          <option value="0">receiver lacks it</option>
+        </select>
       </div>
     </div>
 
@@ -258,6 +277,8 @@ Chroma pass tracks separately, so you can watch the enhancement layer fall away 
 Drag <b>Green ambient</b> up in loopback: separation on the scope drops, the blue bar stops filling, the yellow one does not. That is the layering doing its job.
 <br><br>
 <b>Try the session layer.</b> Start a transfer, then hit <b>Swap payload</b> partway through. The receiver reports the new object rather than mixing the two, and each file keeps its own progress — swap back and a partly received one resumes where it left off instead of restarting. See <b>SPEC.md §4</b> for why identity, not begin/end markers, is the right primitive for a broadcast fountain.
+<br><br>
+<b>Try encryption.</b> Turn <b>Encryption</b> on, then set <b>Decryption key</b> to <i>receiver lacks it</i>. The read stays perfect — 100% band pass, every symbol collected, payload reassembled and checksum-verified — and it still yields nothing. Perfect reception is not the security boundary; key possession is. The filename is not in the public manifest either: it rides inside the sealed envelope. <b>SPEC.md §11</b>, including what this deliberately does <i>not</i> hide.
 <br><br>
 <b>Camera in a sandboxed frame is often blocked</b> — save this file and open it from disk if the camera button errors.
 </p>

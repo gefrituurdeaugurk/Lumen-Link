@@ -42,9 +42,30 @@ export {
   Tlv,
   packManifest,
   parseManifest,
+  type EncryptionInfo,
   type Manifest,
   type SetMembership,
 } from "./core/manifest.ts";
+
+export {
+  CryptoSuite,
+  KEY_BYTES,
+  TAG_BYTES,
+  associatedData,
+  generateKey,
+  isSupportedSuite,
+  open,
+  seal,
+} from "./core/crypto.ts";
+
+export {
+  INNER_VERSION,
+  InnerTlv,
+  openPayload,
+  sealPayload,
+  type EnvelopeMetadata,
+  type OpenedEnvelope,
+} from "./core/envelope.ts";
 
 export {
   DEFAULT_SESSION_CACHE,
