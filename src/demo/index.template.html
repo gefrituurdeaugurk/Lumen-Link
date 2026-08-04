@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lumen Link — optical fountain transfer</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;600;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --ink:#0B0B0F;
+  --sig-blue:#1B2CFF;
+  --sig-yellow:#FFE500;
+  --paper:#FFFFFF;
+  --surface:#E8E9EC;
+  --surface-2:#D6D8DE;
+  --dim:#6A6D78;
+  --ui:'Archivo',system-ui,sans-serif;
+  --mono:'IBM Plex Mono',ui-monospace,Menlo,monospace;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{
+  background:var(--surface);
+  color:var(--ink);
+  font-family:var(--ui);
+  font-size:15px;
+  line-height:1.45;
+  -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:1240px;margin:0 auto;padding:20px 18px 60px}
+
+/* ---- masthead ---- */
+header.top{
+  border-bottom:2px solid var(--ink);
+  padding-bottom:10px;margin-bottom:18px;
+  display:flex;align-items:flex-end;justify-content:space-between;gap:16px;flex-wrap:wrap;
+}
+h1{
+  font-size:clamp(26px,4.2vw,42px);font-weight:800;margin:0;
+  letter-spacing:-0.035em;line-height:0.95;
+}
+h1 .b{color:var(--sig-blue)}
+.tag{font-family:var(--mono);font-size:11.5px;color:var(--dim);max-width:44ch;letter-spacing:-0.01em}
+
+/* ---- panels ---- */
+.bench{display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start}
+@media(max-width:900px){.bench{grid-template-columns:1fr}}
+.panel{background:var(--paper);border:2px solid var(--ink);padding:14px}
+.panel > h2{
+  font-family:var(--mono);font-size:11px;font-weight:600;text-transform:uppercase;
+  letter-spacing:0.14em;margin:0 0 12px;padding-bottom:7px;
+  border-bottom:1px solid var(--surface-2);display:flex;justify-content:space-between;align-items:center;
+}
+.panel > h2 .st{font-weight:400;color:var(--dim);letter-spacing:0.04em;text-transform:none}
+
+/* ---- controls ---- */
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-bottom:10px}
+.field{display:flex;flex-direction:column;gap:3px;flex:1;min-width:78px}
+label{font-family:var(--mono);font-size:9.5px;text-transform:uppercase;letter-spacing:0.1em;color:var(--dim)}
+select,input[type=file],input[type=text]{
+  font-family:var(--mono);font-size:12px;padding:6px 7px;
+  border:1px solid var(--ink);background:var(--paper);color:var(--ink);border-radius:0;width:100%;
+}
+input[type=range]{width:100%;accent-color:var(--sig-blue);margin:6px 0 0}
+button{
+  font-family:var(--ui);font-weight:600;font-size:13px;letter-spacing:-0.01em;
+  padding:8px 15px;border:2px solid var(--ink);background:var(--ink);color:var(--paper);
+  cursor:pointer;border-radius:0;transition:background .12s,color .12s;
+}
+button.ghost{background:var(--paper);color:var(--ink)}
+button:hover:not(:disabled){background:var(--sig-blue);border-color:var(--sig-blue);color:var(--paper)}
+button:disabled{opacity:.35;cursor:not-allowed}
+button:focus-visible,select:focus-visible,input:focus-visible{outline:3px solid var(--sig-yellow);outline-offset:1px}
+
+/* ---- canvases ---- */
+.stage{background:var(--ink);display:flex;align-items:center;justify-content:center;position:relative;overflow:hidden}
+#txCanvas{display:block;image-rendering:pixelated;max-width:100%;height:auto}
+.viewport{position:relative;width:100%;aspect-ratio:4/3;background:var(--ink)}
+.viewport video,.viewport canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}
+#rxOverlay{pointer-events:none}
+.hint{font-family:var(--mono);font-size:10.5px;color:var(--dim);margin-top:8px;line-height:1.5}
+
+/* ---- readout ---- */
+.readout{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--surface-2);border:1px solid var(--surface-2);margin-top:12px}
+.cellv{background:var(--paper);padding:7px 8px}
+.cellv .k{font-family:var(--mono);font-size:9px;text-transform:uppercase;letter-spacing:.09em;color:var(--dim);display:block}
+.cellv .v{font-family:var(--mono);font-size:17px;font-weight:600;letter-spacing:-0.03em;line-height:1.25}
+.cellv .v small{font-size:10px;font-weight:400;color:var(--dim);letter-spacing:0}
+@media(max-width:520px){.readout{grid-template-columns:repeat(2,1fr)}}
+
+/* ---- progress: the signature strip ---- */
+.prog{margin-top:12px}
+.prog .bar{height:26px;background:var(--ink);position:relative;overflow:hidden}
+.prog .fill{position:absolute;inset:0 auto 0 0;width:0;background:var(--sig-yellow);transition:width .16s linear}
+.prog .fill.blue{background:var(--sig-blue)}
+.prog .lbl{
+  position:absolute;inset:0;display:flex;align-items:center;justify-content:space-between;
+  padding:0 9px;font-family:var(--mono);font-size:10.5px;font-weight:600;
+  color:var(--paper);mix-blend-mode:difference;letter-spacing:.06em;
+}
+/* channel scope */
+.scope{margin-top:12px;border:1px solid var(--surface-2)}
+.scope canvas{display:block;width:100%;height:74px}
+.scopeCap{font-family:var(--mono);font-size:9px;letter-spacing:.09em;text-transform:uppercase;color:var(--dim);padding:4px 7px;border-top:1px solid var(--surface-2);display:flex;justify-content:space-between}
+
+.legend{display:flex;gap:12px;flex-wrap:wrap;font-family:var(--mono);font-size:10px;color:var(--dim);margin-top:9px}
+.legend i{width:9px;height:9px;display:inline-block;border:1px solid var(--ink);margin-right:4px;vertical-align:-1px}
+
+.note{font-family:var(--mono);font-size:11px;line-height:1.6;color:var(--dim);
+  border-top:2px solid var(--ink);margin-top:22px;padding-top:12px}
+.note b{color:var(--ink);font-weight:600}
+.note a{color:var(--sig-blue)}
+.err{font-family:var(--mono);font-size:11px;color:var(--paper);background:var(--sig-blue);padding:7px 9px;margin-top:9px;display:none}
+.done{background:var(--sig-yellow);border:2px solid var(--ink);padding:10px;margin-top:12px;display:none;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.done .fn{font-family:var(--mono);font-size:11.5px;font-weight:600;word-break:break-all}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="top">
+  <h1>Lumen<span class="b">·</span>Link</h1>
+  <p class="tag">Rateless optical file transfer. Four-colour code, black/blue/yellow/white. Luma carries the base layer, the blue–yellow axis carries the enhancement layer. LT fountain over both, so any 4 bands you catch are as good as any other 4.</p>
+</header>
+
+<div class="bench">
+
+  <!-- ================= TRANSMIT ================= -->
+  <section class="panel">
+    <h2>Transmit <span class="st" id="txState">idle</span></h2>
+
+    <div class="row">
+      <div class="field" style="flex:2 1 180px">
+        <label for="fileIn">Payload file</label>
+        <input type="file" id="fileIn">
+      </div>
+      <div class="field">
+        <label for="gridSel">Grid</label>
+        <select id="gridSel">
+          <option value="48">48 × 48</option>
+          <option value="64" selected>64 × 64</option>
+          <option value="80">80 × 80</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="field">
+        <label for="fpsSel">Frame rate</label>
+        <select id="fpsSel">
+          <option value="5">5 fps</option>
+          <option value="8">8 fps</option>
+          <option value="12" selected>12 fps</option>
+          <option value="20">20 fps</option>
+          <option value="30">30 fps</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="chromaSel">Enhancement layer</label>
+        <select id="chromaSel">
+          <option value="1" selected>on (blue axis)</option>
+          <option value="0">off (luma only)</option>
+        </select>
+      </div>
+      <div class="field" style="flex:0 0 auto">
+        <label>&nbsp;</label>
+        <button id="txBtn">Start transmit</button>
+      </div>
+      <div class="field" style="flex:0 0 auto">
+        <label>&nbsp;</label>
+        <button id="swapBtn" class="ghost">Swap payload</button>
+      </div>
+    </div>
+
+    <div class="stage"><canvas id="txCanvas" width="512" height="512"></canvas></div>
+
+    <div class="readout">
+      <div class="cellv"><span class="k">File</span><span class="v" id="txFile" style="font-size:12px">demo text</span></div>
+      <div class="cellv"><span class="k">Session</span><span class="v" id="txSession" style="font-size:12px">–</span></div>
+      <div class="cellv"><span class="k">Blocks (K)</span><span class="v" id="txK">–</span></div>
+      <div class="cellv"><span class="k">Symbol</span><span class="v" id="txSym">–<small> B</small></span></div>
+    </div>
+    <div class="readout" style="grid-template-columns:1fr">
+      <div class="cellv"><span class="k">Offered</span><span class="v" id="txRate">–<small> B/s</small></span></div>
+    </div>
+    <p class="hint">Five fountain symbols per frame: four from the luma bands, one spanning the whole grid on the blue axis. Manifest rides band 0 every fourth frame, so a receiver that joins late syncs within a few hundred milliseconds. Every symbol carries the session id, so a receiver can tell one object from the next without ever seeing a start or end marker.</p>
+  </section>
+
+  <!-- ================= RECEIVE ================= -->
+  <section class="panel">
+    <h2>Receive <span class="st" id="rxState">idle</span></h2>
+
+    <div class="row">
+      <div class="field" style="flex:0 0 auto">
+        <label>&nbsp;</label>
+        <button id="camBtn" class="ghost">Use camera</button>
+      </div>
+      <div class="field" style="flex:0 0 auto">
+        <label>&nbsp;</label>
+        <button id="loopBtn" class="ghost">Use loopback</button>
+      </div>
+      <div class="field" style="flex:0 0 auto">
+        <label>&nbsp;</label>
+        <button id="rxStop" class="ghost" disabled>Stop</button>
+      </div>
+    </div>
+
+    <div class="row" id="simRow" style="display:none">
+      <div class="field"><label for="simNoise">Sensor noise <span id="vNoise">14</span></label><input type="range" id="simNoise" min="0" max="60" value="14"></div>
+      <div class="field"><label for="simBlur">Defocus <span id="vBlur">1.0</span>px</label><input type="range" id="simBlur" min="0" max="40" value="10"></div>
+      <div class="field"><label for="simTint">Green ambient <span id="vTint">0</span>%</label><input type="range" id="simTint" min="0" max="95" value="0"></div>
+      <div class="field"><label for="simRot">Skew <span id="vRot">6</span>°</label><input type="range" id="simRot" min="0" max="20" value="6"></div>
+    </div>
+
+    <div class="viewport">
+      <video id="rxVideo" playsinline muted autoplay></video>
+      <canvas id="rxSim"></canvas>
+      <canvas id="rxOverlay"></canvas>
+    </div>
+    <div class="err" id="rxErr"></div>
+
+    <div class="readout">
+      <div class="cellv"><span class="k">Lock</span><span class="v" id="mLock">–</span></div>
+      <div class="cellv"><span class="k">Band pass</span><span class="v" id="mBand">–<small> %</small></span></div>
+      <div class="cellv"><span class="k">Chroma pass</span><span class="v" id="mChroma">–<small> %</small></span></div>
+      <div class="cellv"><span class="k">Goodput</span><span class="v" id="mRate">–<small> B/s</small></span></div>
+    </div>
+
+    <div class="prog">
+      <div class="bar"><div class="fill" id="pFill"></div>
+        <div class="lbl"><span id="pTxt">no manifest yet</span><span id="pPct"></span></div>
+      </div>
+    </div>
+
+    <div class="scope">
+      <canvas id="scope" width="600" height="74"></canvas>
+      <div class="scopeCap"><span>Blue-axis separation, per frame</span><span id="sepTxt">–</span></div>
+    </div>
+    <div class="legend">
+      <span><i style="background:#FFE500"></i>base layer accepted</span>
+      <span><i style="background:#1B2CFF"></i>enhancement accepted</span>
+      <span><i style="background:#0B0B0F"></i>rejected (CRC)</span>
+    </div>
+
+    <div class="done" id="doneBox">
+      <span class="fn" id="doneName"></span>
+      <button id="dlBtn">Save file</button>
+    </div>
+  </section>
+
+</div>
+
+<p class="note">
+<b>What to measure.</b> Band pass rate is your rolling-shutter tear rate plus read errors: four independent bands per frame means a tear costs you one symbol, not the whole frame.
+Chroma pass tracks separately, so you can watch the enhancement layer fall away on its own while the base layer keeps converging.
+Drag <b>Green ambient</b> up in loopback: separation on the scope drops, the blue bar stops filling, the yellow one does not. That is the layering doing its job.
+<br><br>
+<b>Try the session layer.</b> Start a transfer, then hit <b>Swap payload</b> partway through. The receiver reports the new object rather than mixing the two, and each file keeps its own progress — swap back and a partly received one resumes where it left off instead of restarting. See <b>SPEC.md §4</b> for why identity, not begin/end markers, is the right primitive for a broadcast fountain.
+<br><br>
+<b>Camera in a sandboxed frame is often blocked</b> — save this file and open it from disk if the camera button errors.
+</p>
+
+</div>
+
+<script>/*BUNDLE*/</script>
+</body>
+</html>

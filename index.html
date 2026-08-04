@@ -111,6 +111,7 @@ button:focus-visible,select:focus-visible,input:focus-visible{outline:3px solid 
 .note{font-family:var(--mono);font-size:11px;line-height:1.6;color:var(--dim);
   border-top:2px solid var(--ink);margin-top:22px;padding-top:12px}
 .note b{color:var(--ink);font-weight:600}
+.note a{color:var(--sig-blue)}
 .err{font-family:var(--mono);font-size:11px;color:var(--paper);background:var(--sig-blue);padding:7px 9px;margin-top:9px;display:none}
 .done{background:var(--sig-yellow);border:2px solid var(--ink);padding:10px;margin-top:12px;display:none;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
 .done .fn{font-family:var(--mono);font-size:11.5px;font-weight:600;word-break:break-all}
@@ -167,17 +168,24 @@ button:focus-visible,select:focus-visible,input:focus-visible{outline:3px solid 
         <label>&nbsp;</label>
         <button id="txBtn">Start transmit</button>
       </div>
+      <div class="field" style="flex:0 0 auto">
+        <label>&nbsp;</label>
+        <button id="swapBtn" class="ghost">Swap payload</button>
+      </div>
     </div>
 
     <div class="stage"><canvas id="txCanvas" width="512" height="512"></canvas></div>
 
     <div class="readout">
       <div class="cellv"><span class="k">File</span><span class="v" id="txFile" style="font-size:12px">demo text</span></div>
+      <div class="cellv"><span class="k">Session</span><span class="v" id="txSession" style="font-size:12px">–</span></div>
       <div class="cellv"><span class="k">Blocks (K)</span><span class="v" id="txK">–</span></div>
       <div class="cellv"><span class="k">Symbol</span><span class="v" id="txSym">–<small> B</small></span></div>
+    </div>
+    <div class="readout" style="grid-template-columns:1fr">
       <div class="cellv"><span class="k">Offered</span><span class="v" id="txRate">–<small> B/s</small></span></div>
     </div>
-    <p class="hint">Five fountain symbols per frame: four from the luma bands, one spanning the whole grid on the blue axis. Manifest rides band 0 every fourth frame, so a receiver that joins late syncs within a few hundred milliseconds.</p>
+    <p class="hint">Five fountain symbols per frame: four from the luma bands, one spanning the whole grid on the blue axis. Manifest rides band 0 every fourth frame, so a receiver that joins late syncs within a few hundred milliseconds. Every symbol carries the session id, so a receiver can tell one object from the next without ever seeing a start or end marker.</p>
   </section>
 
   <!-- ================= RECEIVE ================= -->
@@ -202,7 +210,7 @@ button:focus-visible,select:focus-visible,input:focus-visible{outline:3px solid 
     <div class="row" id="simRow" style="display:none">
       <div class="field"><label for="simNoise">Sensor noise <span id="vNoise">14</span></label><input type="range" id="simNoise" min="0" max="60" value="14"></div>
       <div class="field"><label for="simBlur">Defocus <span id="vBlur">1.0</span>px</label><input type="range" id="simBlur" min="0" max="40" value="10"></div>
-      <div class="field"><label for="simTint">Green ambient <span id="vTint">0</span>%</label><input type="range" id="simTint" min="0" max="90" value="0"></div>
+      <div class="field"><label for="simTint">Green ambient <span id="vTint">0</span>%</label><input type="range" id="simTint" min="0" max="95" value="0"></div>
       <div class="field"><label for="simRot">Skew <span id="vRot">6</span>°</label><input type="range" id="simRot" min="0" max="20" value="6"></div>
     </div>
 
@@ -248,6 +256,9 @@ button:focus-visible,select:focus-visible,input:focus-visible{outline:3px solid 
 <b>What to measure.</b> Band pass rate is your rolling-shutter tear rate plus read errors: four independent bands per frame means a tear costs you one symbol, not the whole frame.
 Chroma pass tracks separately, so you can watch the enhancement layer fall away on its own while the base layer keeps converging.
 Drag <b>Green ambient</b> up in loopback: separation on the scope drops, the blue bar stops filling, the yellow one does not. That is the layering doing its job.
+<br><br>
+<b>Try the session layer.</b> Start a transfer, then hit <b>Swap payload</b> partway through. The receiver reports the new object rather than mixing the two, and each file keeps its own progress — swap back and a partly received one resumes where it left off instead of restarting. See <b>SPEC.md §4</b> for why identity, not begin/end markers, is the right primitive for a broadcast fountain.
+<br><br>
 <b>Camera in a sandboxed frame is often blocked</b> — save this file and open it from disk if the camera button errors.
 </p>
 
@@ -255,616 +266,1619 @@ Drag <b>Green ambient</b> up in loopback: separation on the scope drops, the blu
 
 <script>
 "use strict";
-
-/* ============================================================
-   1. Primitives
-   ============================================================ */
-const CRC_T=(()=>{const t=new Uint32Array(256);for(let i=0;i<256;i++){let c=i;for(let k=0;k<8;k++)c=(c&1)?(0xEDB88320^(c>>>1)):(c>>>1);t[i]=c>>>0}return t})();
-function crc32(b){let c=0xFFFFFFFF;for(let i=0;i<b.length;i++)c=CRC_T[(c^b[i])&0xFF]^(c>>>8);return (c^0xFFFFFFFF)>>>0}
-function mulberry32(a){return function(){a|=0;a=(a+0x6D2B79F5)|0;let t=Math.imul(a^(a>>>15),1|a);t=(t+Math.imul(t^(t>>>7),61|t))^t;return ((t^(t>>>14))>>>0)/4294967296}}
-function xorInto(d,s){for(let i=0;i<d.length;i++)d[i]^=s[i]}
-
-/* LT fountain: robust soliton degree distribution */
-function solitonCDF(K){
-  const delta=0.05,c=0.03;
-  const R=Math.max(1,c*Math.log(K/delta)*Math.sqrt(K));
-  const w=new Float64Array(K+1);
-  w[1]=1/K; for(let d=2;d<=K;d++)w[d]=1/(d*(d-1));
-  const piv=Math.max(1,Math.round(K/R));
-  for(let d=1;d<piv&&d<=K;d++)w[d]+=R/(d*K);
-  if(piv<=K)w[piv]+=R*Math.log(R/delta)/K;
-  let Z=0;for(let d=1;d<=K;d++)Z+=w[d];
-  const cdf=new Float64Array(K+1);let acc=0;
-  for(let d=1;d<=K;d++){acc+=w[d]/Z;cdf[d]=acc}
-  return cdf;
-}
-function pickDegree(cdf,K,u){for(let d=1;d<=K;d++)if(u<=cdf[d])return d;return K}
-/* Deterministic from ESI alone: encoder and decoder agree with no side channel */
-function symbolBlocks(esi,K,cdf){
-  const r=mulberry32((Math.imul(esi+1,2654435761))>>>0);
-  const d=Math.min(K,pickDegree(cdf,K,r()));
-  const s=new Set();let guard=0;
-  while(s.size<d&&guard++<K*20)s.add(Math.floor(r()*K)%K);
-  return [...s];
-}
-
-class LTEncoder{
-  constructor(bytes,symBytes){
-    this.S=symBytes;this.total=bytes.length;
-    this.K=Math.max(1,Math.ceil(bytes.length/symBytes));
-    this.blocks=[];
-    for(let i=0;i<this.K;i++){const b=new Uint8Array(symBytes);b.set(bytes.subarray(i*symBytes,Math.min(bytes.length,(i+1)*symBytes)));this.blocks.push(b)}
-    this.cdf=solitonCDF(this.K);this.esi=0;this.fileCRC=crc32(bytes);
-  }
-  next(){
-    const esi=this.esi++ & 0xFFFF;
-    const out=new Uint8Array(this.S);
-    for(const i of symbolBlocks(esi,this.K,this.cdf))xorInto(out,this.blocks[i]);
-    return {esi,data:out};
-  }
-}
-
-class LTDecoder{
-  constructor(K,symBytes,total,fileCRC){
-    this.K=K;this.S=symBytes;this.total=total;this.fileCRC=fileCRC;
-    this.cdf=solitonCDF(K);this.blocks=new Array(K).fill(null);
-    this.have=0;this.pending=[];this.seen=new Set();this.done=false;
-  }
-  add(esi,data){
-    if(this.done||this.seen.has(esi))return false;
-    this.seen.add(esi);
-    const d=data.slice(),rem=[];
-    for(const i of symbolBlocks(esi,this.K,this.cdf)){
-      if(this.blocks[i])xorInto(d,this.blocks[i]); else rem.push(i);
+(() => {
+  // src/core/bits.ts
+  var BitWriter = class {
+    bits;
+    p = 0;
+    constructor(capacity) {
+      this.bits = new Uint8Array(capacity);
     }
-    this.pending.push({d,rem});this.peel();
-    if(this.have===this.K)this.done=true;
-    return true;
+    get position() {
+      return this.p;
+    }
+    get remaining() {
+      return this.bits.length - this.p;
+    }
+    /** Write the low `width` bits of `value`, most significant first. */
+    writeBits(value, width) {
+      if (this.p + width > this.bits.length) throw new RangeError("bit overflow");
+      for (let i = width - 1; i >= 0; i--) this.bits[this.p++] = value >>> i & 1;
+    }
+    writeBytes(bytes) {
+      for (let i = 0; i < bytes.length; i++) this.writeBits(bytes[i], 8);
+    }
+    /** Fill the remainder from `fill`. Keeps the field visually busy so that
+     *  thresholding still sees both palette extremes in a sparse frame. */
+    padWith(fill2) {
+      while (this.p < this.bits.length) this.bits[this.p++] = fill2() < 0.5 ? 0 : 1;
+    }
+  };
+  var BitReader = class {
+    p = 0;
+    bits;
+    constructor(bits) {
+      this.bits = bits;
+    }
+    get position() {
+      return this.p;
+    }
+    seek(bit) {
+      this.p = bit;
+    }
+    readBits(width) {
+      let v = 0;
+      for (let i = 0; i < width; i++) v = (v << 1 | this.bits[this.p++]) >>> 0;
+      return v >>> 0;
+    }
+    readBytes(count) {
+      const out = new Uint8Array(count);
+      for (let i = 0; i < count * 8; i++) {
+        if (this.bits[this.p++]) out[i >> 3] |= 128 >> (i & 7);
+      }
+      return out;
+    }
+  };
+  function xorInto(dst, src) {
+    for (let i = 0; i < dst.length; i++) dst[i] ^= src[i];
   }
-  peel(){
-    let go=true;
-    while(go){
-      go=false;
-      for(const s of this.pending){
-        if(s.rem.length===1&&!this.blocks[s.rem[0]]){
-          const i=s.rem[0];this.blocks[i]=s.d.slice();this.have++;go=true;
-          for(const q of this.pending){
-            const k=q.rem.indexOf(i);
-            if(k>=0){xorInto(q.d,this.blocks[i]);q.rem.splice(k,1)}
+  function writeU32BE(out, offset, v) {
+    out[offset] = v >>> 24 & 255;
+    out[offset + 1] = v >>> 16 & 255;
+    out[offset + 2] = v >>> 8 & 255;
+    out[offset + 3] = v & 255;
+  }
+  function readU32BE(b, offset) {
+    return (b[offset] << 24 | b[offset + 1] << 16 | b[offset + 2] << 8 | b[offset + 3]) >>> 0;
+  }
+  function writeU16BE(out, offset, v) {
+    out[offset] = v >>> 8 & 255;
+    out[offset + 1] = v & 255;
+  }
+  function readU16BE(b, offset) {
+    return (b[offset] << 8 | b[offset + 1]) >>> 0;
+  }
+
+  // src/core/crc.ts
+  var TABLE = /* @__PURE__ */ (() => {
+    const t = new Uint32Array(256);
+    for (let i = 0; i < 256; i++) {
+      let c = i;
+      for (let k = 0; k < 8; k++) c = c & 1 ? 3988292384 ^ c >>> 1 : c >>> 1;
+      t[i] = c >>> 0;
+    }
+    return t;
+  })();
+  function crc32(bytes) {
+    let c = 4294967295;
+    for (let i = 0; i < bytes.length; i++) c = TABLE[(c ^ bytes[i]) & 255] ^ c >>> 8;
+    return (c ^ 4294967295) >>> 0;
+  }
+  function crc32Concat(...parts) {
+    let c = 4294967295;
+    for (const p of parts) {
+      for (let i = 0; i < p.length; i++) c = TABLE[(c ^ p[i]) & 255] ^ c >>> 8;
+    }
+    return (c ^ 4294967295) >>> 0;
+  }
+
+  // src/core/rng.ts
+  function mulberry32(seed) {
+    let a = seed | 0;
+    return () => {
+      a = a + 1831565813 | 0;
+      let t = Math.imul(a ^ a >>> 15, 1 | a);
+      t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+      return ((t ^ t >>> 14) >>> 0) / 4294967296;
+    };
+  }
+
+  // src/core/framing.ts
+  var HEADER_BYTES = 4;
+  var HEADER_REPEATS = 3;
+  var HEADER_BITS = HEADER_BYTES * 8 * HEADER_REPEATS;
+  var CRC_BITS = 32;
+  var CHROMA_BAND = 8;
+  var FrameType = {
+    /** A fountain symbol. */
+    Data: 0,
+    /** An uncoded session manifest. */
+    Manifest: 1,
+    /** Advisory notice that the fountain is about to stop. */
+    Close: 2
+  };
+  var MASK_CACHE = /* @__PURE__ */ new Map();
+  function whiteningMask(band, capacity) {
+    const key = `${band}:${capacity}`;
+    const hit = MASK_CACHE.get(key);
+    if (hit) return hit;
+    const rand = mulberry32(Math.imul(band + 40503, 2246822507) >>> 0);
+    const mask = new Uint8Array(capacity);
+    for (let i = 0; i < capacity; i++) mask[i] = rand() < 0.5 ? 0 : 1;
+    MASK_CACHE.set(key, mask);
+    return mask;
+  }
+  function applyWhitening(bits, band) {
+    const mask = whiteningMask(band, bits.length);
+    for (let i = 0; i < bits.length; i++) bits[i] ^= mask[i];
+  }
+  function bandBitsNeeded(symBytes) {
+    return HEADER_BITS + symBytes * 8 + CRC_BITS;
+  }
+  function packBand(type, band, esi, sid8, payload2, capacity) {
+    if (bandBitsNeeded(payload2.length) > capacity) {
+      throw new RangeError(`payload of ${payload2.length}B does not fit in ${capacity} bits`);
+    }
+    const header = new Uint8Array(HEADER_BYTES);
+    header[0] = (type & 15) << 4 | band & 15;
+    header[1] = esi >>> 8 & 255;
+    header[2] = esi & 255;
+    header[3] = sid8 & 255;
+    const w = new BitWriter(capacity);
+    for (let r = 0; r < HEADER_REPEATS; r++) w.writeBytes(header);
+    w.writeBytes(payload2);
+    w.writeBits(crc32Concat(header, payload2), 32);
+    if (w.remaining > 0) {
+      const rand = mulberry32((Math.imul(esi + 1, 668265261) ^ band) >>> 0);
+      w.padWith(rand);
+    }
+    applyWhitening(w.bits, band);
+    return w.bits;
+  }
+  function unpackBand(bits, band, symBytes) {
+    if (bits.length < bandBitsNeeded(symBytes)) return null;
+    const plane = bits.slice();
+    applyWhitening(plane, band);
+    const header = new Uint8Array(HEADER_BYTES);
+    const headerBits = HEADER_BYTES * 8;
+    for (let i = 0; i < headerBits; i++) {
+      let votes = 0;
+      for (let r = 0; r < HEADER_REPEATS; r++) votes += plane[i + r * headerBits];
+      if (votes * 2 > HEADER_REPEATS) header[i >> 3] |= 128 >> (i & 7);
+    }
+    const reader = new BitReader(plane);
+    reader.seek(HEADER_BITS);
+    const payload2 = reader.readBytes(symBytes);
+    const checksum = reader.readBits(32);
+    if (crc32Concat(header, payload2) !== checksum) return null;
+    return {
+      type: header[0] >> 4,
+      band: header[0] & 15,
+      esi: (header[1] << 8 | header[2]) >>> 0,
+      sid8: header[3],
+      payload: payload2
+    };
+  }
+
+  // src/core/geometry.ts
+  var NBANDS = 4;
+  function geometry(W) {
+    if (W % 16 !== 0) throw new RangeError(`grid ${W} must be a multiple of 16`);
+    const bandH = (W - 16) / NBANDS;
+    const bandCapacity = W * bandH;
+    const chromaCapacity = (W >> 1) * (W - 16 >> 1);
+    const usable = Math.min(bandCapacity, chromaCapacity) - HEADER_BITS - CRC_BITS;
+    const symBytes = Math.max(8, Math.floor(usable / 8) >> 3 << 3);
+    return {
+      W,
+      bandH,
+      bandCapacity,
+      chromaCapacity,
+      symBytes,
+      corners: [
+        [4, 4],
+        [W - 4, 4],
+        [W - 4, W - 4],
+        [4, W - 4]
+      ]
+    };
+  }
+  function bandRow(g, band) {
+    return 8 + band * g.bandH;
+  }
+
+  // src/core/lt.ts
+  var ESI_SPACE = 1 << 16;
+  var MAX_K = 8192;
+  var DELTA = 0.05;
+  var C = 0.03;
+  function solitonCDF(K) {
+    const R = Math.max(1, C * Math.log(K / DELTA) * Math.sqrt(K));
+    const w = new Float64Array(K + 1);
+    w[1] = 1 / K;
+    for (let d = 2; d <= K; d++) w[d] = 1 / (d * (d - 1));
+    const pivot = Math.max(1, Math.round(K / R));
+    for (let d = 1; d < pivot && d <= K; d++) w[d] += R / (d * K);
+    if (pivot <= K) w[pivot] += R * Math.log(R / DELTA) / K;
+    let total = 0;
+    for (let d = 1; d <= K; d++) total += w[d];
+    const cdf = new Float64Array(K + 1);
+    let acc = 0;
+    for (let d = 1; d <= K; d++) {
+      acc += w[d] / total;
+      cdf[d] = acc;
+    }
+    return cdf;
+  }
+  function pickDegree(cdf, K, u) {
+    for (let d = 1; d <= K; d++) if (u <= cdf[d]) return d;
+    return K;
+  }
+  function symbolBlocks(esi, K, cdf) {
+    const rand = mulberry32(Math.imul(esi + 1, 2654435761) >>> 0);
+    const degree = Math.min(K, pickDegree(cdf, K, rand()));
+    const picked = /* @__PURE__ */ new Set();
+    let guard = 0;
+    while (picked.size < degree && guard++ < K * 20) {
+      picked.add(Math.floor(rand() * K) % K);
+    }
+    return [...picked];
+  }
+  var LTEncoder = class {
+    K;
+    total;
+    fileCRC;
+    symBytes;
+    blocks = [];
+    cdf;
+    counter = 0;
+    constructor(payload2, symBytes) {
+      this.symBytes = symBytes;
+      this.total = payload2.length;
+      this.K = Math.max(1, Math.ceil(payload2.length / symBytes));
+      if (this.K > MAX_K) {
+        throw new RangeError(
+          `payload needs K=${this.K} source blocks, over the ${MAX_K} ceiling; segment it across sessions (SPEC.md \xA77)`
+        );
+      }
+      for (let i = 0; i < this.K; i++) {
+        const b = new Uint8Array(symBytes);
+        b.set(payload2.subarray(i * symBytes, Math.min(payload2.length, (i + 1) * symBytes)));
+        this.blocks.push(b);
+      }
+      this.cdf = solitonCDF(this.K);
+      this.fileCRC = crc32(payload2);
+    }
+    /** Distinct symbols emitted so far. */
+    get emitted() {
+      return this.counter;
+    }
+    /** True once the ESI space has been exhausted and symbols start repeating. */
+    get exhausted() {
+      return this.counter >= ESI_SPACE;
+    }
+    next() {
+      const esi = this.counter++ % ESI_SPACE;
+      const data = new Uint8Array(this.symBytes);
+      for (const i of symbolBlocks(esi, this.K, this.cdf)) xorInto(data, this.blocks[i]);
+      return { esi, data };
+    }
+  };
+  var LTDecoder = class {
+    K;
+    symBytes;
+    total;
+    fileCRC;
+    blocks;
+    cdf;
+    seen = /* @__PURE__ */ new Set();
+    pending = [];
+    recovered = 0;
+    constructor(K, symBytes, total, fileCRC) {
+      this.K = K;
+      this.symBytes = symBytes;
+      this.total = total;
+      this.fileCRC = fileCRC;
+      this.blocks = new Array(K).fill(null);
+      this.cdf = solitonCDF(K);
+    }
+    get have() {
+      return this.recovered;
+    }
+    get complete() {
+      return this.recovered === this.K;
+    }
+    /** Distinct ESIs consumed. Once this reaches ESI_SPACE the fountain has
+     *  nothing new to offer and a stalled session must be abandoned. */
+    get distinctSeen() {
+      return this.seen.size;
+    }
+    get exhausted() {
+      return !this.complete && this.seen.size >= ESI_SPACE;
+    }
+    /** @returns true if the symbol was new and was absorbed. */
+    add(esi, data) {
+      if (this.complete || this.seen.has(esi)) return false;
+      this.seen.add(esi);
+      const residual = data.slice();
+      const remaining = [];
+      for (const i of symbolBlocks(esi, this.K, this.cdf)) {
+        const known = this.blocks[i];
+        if (known) xorInto(residual, known);
+        else remaining.push(i);
+      }
+      this.pending.push({ data: residual, remaining });
+      this.peel();
+      return true;
+    }
+    peel() {
+      let progressed = true;
+      while (progressed) {
+        progressed = false;
+        for (const s of this.pending) {
+          if (s.remaining.length !== 1) continue;
+          const i = s.remaining[0];
+          if (this.blocks[i]) continue;
+          this.blocks[i] = s.data.slice();
+          this.recovered++;
+          progressed = true;
+          for (const other of this.pending) {
+            const at = other.remaining.indexOf(i);
+            if (at >= 0) {
+              xorInto(other.data, this.blocks[i]);
+              other.remaining.splice(at, 1);
+            }
+          }
+        }
+        if (progressed) this.pending = this.pending.filter((s) => s.remaining.length > 0);
+      }
+    }
+    /** Reassemble the payload. Recovered blocks only; gaps read as zeros. */
+    assemble() {
+      const out = new Uint8Array(this.K * this.symBytes);
+      for (let i = 0; i < this.K; i++) {
+        const b = this.blocks[i];
+        if (b) out.set(b, i * this.symBytes);
+      }
+      return out.subarray(0, this.total);
+    }
+    /** Reassemble and check against the manifest's whole-file CRC. */
+    verify() {
+      const bytes = this.assemble();
+      return { bytes, ok: this.complete && crc32(bytes) === this.fileCRC };
+    }
+  };
+
+  // src/core/manifest.ts
+  var MANIFEST_MAGIC = 76;
+  var MANIFEST_VERSION = 2;
+  var MANIFEST_CORE_BYTES = 18;
+  var Tlv = {
+    End: 0,
+    Name: 1,
+    ContentType: 2,
+    /** setId u32, objIndex u16, objCount u16 */
+    Set: 3,
+    /** Reserved: detached signature over the core record. Not yet defined. */
+    Signature: 4
+  };
+  var utf8 = new TextEncoder();
+  var utf8Decode = new TextDecoder();
+  function packManifest(m, size) {
+    if (size < MANIFEST_CORE_BYTES + 1) {
+      throw new RangeError(`manifest needs at least ${MANIFEST_CORE_BYTES + 1} bytes`);
+    }
+    const b = new Uint8Array(size);
+    b[0] = MANIFEST_MAGIC;
+    b[1] = MANIFEST_VERSION;
+    writeU32BE(b, 2, m.sessionId);
+    writeU32BE(b, 6, m.total);
+    writeU16BE(b, 10, m.K);
+    writeU16BE(b, 12, m.symBytes);
+    writeU32BE(b, 14, m.fileCRC);
+    let p = MANIFEST_CORE_BYTES;
+    const room = () => size - p - 1;
+    const put = (tag, value) => {
+      if (value.length > 255 || value.length + 2 > room()) return;
+      b[p++] = tag;
+      b[p++] = value.length;
+      b.set(value, p);
+      p += value.length;
+    };
+    if (m.set && m.set.objCount > 1) {
+      const v = new Uint8Array(8);
+      writeU32BE(v, 0, m.set.setId);
+      writeU16BE(v, 4, m.set.objIndex);
+      writeU16BE(v, 6, m.set.objCount);
+      put(Tlv.Set, v);
+    }
+    if (m.name) {
+      let encoded = utf8.encode(m.name);
+      if (encoded.length + 2 > room()) encoded = truncateUtf8(encoded, Math.max(0, room() - 2));
+      if (encoded.length > 0) put(Tlv.Name, encoded);
+    }
+    if (m.contentType) put(Tlv.ContentType, utf8.encode(m.contentType));
+    b[p] = Tlv.End;
+    return b;
+  }
+  function truncateUtf8(bytes, max) {
+    if (bytes.length <= max) return bytes;
+    let end = max;
+    while (end > 0 && (bytes[end] & 192) === 128) end--;
+    return bytes.subarray(0, end);
+  }
+  function parseManifest(b) {
+    if (b.length < MANIFEST_CORE_BYTES) return null;
+    if (b[0] !== MANIFEST_MAGIC || b[1] !== MANIFEST_VERSION) return null;
+    const sessionId = readU32BE(b, 2);
+    const total = readU32BE(b, 6);
+    const K = readU16BE(b, 10);
+    const symBytes = readU16BE(b, 12);
+    const fileCRC = readU32BE(b, 14);
+    if (K < 1 || K > MAX_K) return null;
+    if (symBytes < 8 || symBytes > 4096) return null;
+    if (total > K * symBytes || total <= (K - 1) * symBytes) return null;
+    let name = "";
+    let contentType;
+    let set;
+    let p = MANIFEST_CORE_BYTES;
+    while (p + 1 < b.length) {
+      const tag = b[p];
+      if (tag === Tlv.End) break;
+      const len = b[p + 1];
+      const start = p + 2;
+      if (start + len > b.length) break;
+      const value = b.subarray(start, start + len);
+      switch (tag) {
+        case Tlv.Name:
+          name = utf8Decode.decode(value);
+          break;
+        case Tlv.ContentType:
+          contentType = utf8Decode.decode(value);
+          break;
+        case Tlv.Set:
+          if (len === 8) {
+            set = {
+              setId: readU32BE(value, 0),
+              objIndex: readU16BE(value, 4),
+              objCount: readU16BE(value, 6)
+            };
+          }
+          break;
+        default:
+          break;
+      }
+      p = start + len;
+    }
+    return {
+      sessionId,
+      total,
+      K,
+      symBytes,
+      fileCRC,
+      name: name || "payload.bin",
+      ...contentType !== void 0 ? { contentType } : {},
+      ...set !== void 0 ? { set } : {}
+    };
+  }
+
+  // src/core/session.ts
+  var DEFAULT_SESSION_CACHE = 4;
+  var PENDING_PER_SHORT_ID = 256;
+  var PENDING_BUCKETS = 4;
+  var utf82 = new TextEncoder();
+  function deriveSessionId(fileCRC, total, name, nonce = 0) {
+    const head = new Uint8Array(12);
+    writeU32BE(head, 0, fileCRC);
+    writeU32BE(head, 4, total);
+    writeU32BE(head, 8, nonce);
+    const nameBytes = utf82.encode(name);
+    const buf = new Uint8Array(head.length + nameBytes.length);
+    buf.set(head);
+    buf.set(nameBytes, head.length);
+    return crc32(buf);
+  }
+  var shortId = (sessionId) => sessionId & 255;
+  var SessionRouter = class {
+    sessions = /* @__PURE__ */ new Map();
+    bindings = /* @__PURE__ */ new Map();
+    // sid8 -> sessionId
+    pending = /* @__PURE__ */ new Map();
+    active = null;
+    cacheSize;
+    constructor(cacheSize = DEFAULT_SESSION_CACHE) {
+      this.cacheSize = cacheSize;
+    }
+    /** The session whose manifest was seen most recently. */
+    get activeSession() {
+      return this.active === null ? null : this.sessions.get(this.active) ?? null;
+    }
+    get(sessionId) {
+      return this.sessions.get(sessionId);
+    }
+    ingest(frame, symBytes) {
+      switch (frame.type) {
+        case FrameType.Manifest:
+          return this.onManifest(frame, symBytes);
+        case FrameType.Data:
+          return this.onData(frame);
+        case FrameType.Close:
+          return this.onClose(frame);
+        default:
+          return { kind: "ignored", reason: "unknown-type" };
+      }
+    }
+    onManifest(frame, symBytes) {
+      const manifest = parseManifest(frame.payload);
+      if (!manifest) return { kind: "ignored", reason: "bad-manifest" };
+      if (manifest.symBytes !== symBytes) {
+        return { kind: "ignored", reason: "geometry-mismatch" };
+      }
+      if (frame.sid8 !== shortId(manifest.sessionId)) {
+        return { kind: "ignored", reason: "sid-mismatch" };
+      }
+      const id = manifest.sessionId;
+      const switched = this.active !== id;
+      let session = this.sessions.get(id);
+      if (session) {
+        this.touch(id);
+      } else {
+        session = {
+          manifest,
+          decoder: new LTDecoder(manifest.K, manifest.symBytes, manifest.total, manifest.fileCRC),
+          closingIn: null
+        };
+        this.sessions.set(id, session);
+        this.evictOverflow();
+      }
+      this.bind(shortId(id), id);
+      this.active = id;
+      this.drainPending(shortId(id), session);
+      return { kind: "manifest", session, switched };
+    }
+    onData(frame) {
+      const id = this.bindings.get(frame.sid8);
+      if (id === void 0) return this.buffer(frame);
+      const session = this.sessions.get(id);
+      if (!session) return this.buffer(frame);
+      this.touch(id);
+      const fresh = session.decoder.add(frame.esi, frame.payload);
+      return fresh ? { kind: "accepted", session } : { kind: "duplicate", session };
+    }
+    onClose(frame) {
+      const id = this.bindings.get(frame.sid8);
+      const session = id === void 0 ? void 0 : this.sessions.get(id);
+      if (!session) return { kind: "buffered", sid8: frame.sid8 };
+      const framesRemaining = (frame.payload[0] << 8 | frame.payload[1]) >>> 0;
+      session.closingIn = framesRemaining;
+      return { kind: "closing", session, framesRemaining };
+    }
+    buffer(frame) {
+      let bucket = this.pending.get(frame.sid8);
+      if (!bucket) {
+        if (this.pending.size >= PENDING_BUCKETS) {
+          const oldest = this.pending.keys().next().value;
+          if (oldest !== void 0) this.pending.delete(oldest);
+        }
+        bucket = [];
+        this.pending.set(frame.sid8, bucket);
+      }
+      if (bucket.length < PENDING_PER_SHORT_ID) {
+        bucket.push({ esi: frame.esi, payload: frame.payload });
+      }
+      return { kind: "buffered", sid8: frame.sid8 };
+    }
+    /**
+     * Point a short id at a session.
+     *
+     * If it previously pointed at a *different* session, anything buffered
+     * under it belongs to that session and must be dropped rather than mixed
+     * in — a fountain symbol carries no self-check beyond the band CRC it has
+     * already passed, so nothing downstream would catch the contamination
+     * before the whole-file CRC fails at the very end.
+     *
+     * A short id that was never bound is the ordinary late-joiner case: those
+     * symbols arrived while we were waiting for exactly this manifest, so they
+     * are kept. Transmitters keep that safe by assigning playlist nonces so no
+     * two objects in a loop share a short id (see `assignNonces`).
+     */
+    bind(sid8, sessionId) {
+      const previous = this.bindings.get(sid8);
+      if (previous !== void 0 && previous !== sessionId) {
+        this.pending.delete(sid8);
+        this.sessions.delete(previous);
+        if (this.active === previous) this.active = null;
+      }
+      this.bindings.set(sid8, sessionId);
+    }
+    drainPending(sid8, session) {
+      const queued = this.pending.get(sid8);
+      if (!queued) return;
+      for (const q of queued) session.decoder.add(q.esi, q.payload);
+      this.pending.delete(sid8);
+    }
+    touch(id) {
+      const s = this.sessions.get(id);
+      if (!s) return;
+      this.sessions.delete(id);
+      this.sessions.set(id, s);
+    }
+    evictOverflow() {
+      while (this.sessions.size > this.cacheSize) {
+        const oldest = this.sessions.keys().next().value;
+        if (oldest === void 0) break;
+        this.sessions.delete(oldest);
+        for (const [s8, id] of this.bindings) if (id === oldest) this.bindings.delete(s8);
+        if (this.active === oldest) this.active = null;
+      }
+    }
+  };
+
+  // src/core/raster.ts
+  var PALETTE = [
+    [11, 11, 15],
+    [255, 229, 0],
+    [27, 44, 255],
+    [255, 255, 255]
+  ];
+  function createGrid(W) {
+    return { W, luma: new Uint8Array(W * W), blue: new Uint8Array(W * W) };
+  }
+  function fill(g, luma, blue) {
+    g.luma.fill(luma);
+    g.blue.fill(blue);
+  }
+  function block(g, x0, y0, w, h, l, b) {
+    for (let y = y0; y < y0 + h; y++) {
+      for (let x = x0; x < x0 + w; x++) {
+        g.luma[y * g.W + x] = l;
+        g.blue[y * g.W + x] = b;
+      }
+    }
+  }
+  function calibrationPatchWidth(W) {
+    return Math.floor((W - 18) / 4);
+  }
+  function drawQuietStructure(g) {
+    const W = g.W;
+    fill(g, 1, 1);
+    block(g, 1, 1, 6, 6, 0, 0);
+    block(g, W - 7, 1, 6, 6, 0, 0);
+    block(g, 1, W - 7, 6, 6, 0, 0);
+    block(g, W - 6, W - 6, 4, 4, 0, 0);
+    const cw = calibrationPatchWidth(W);
+    for (let k = 0; k < 4; k++) {
+      block(g, 9 + k * cw, 1, cw, 6, k >> 1, k & 1);
+    }
+  }
+  function writeLumaBand(g, geo, band, bits) {
+    let p = 0;
+    for (let r = 0; r < geo.bandH; r++) {
+      const y = bandRow(geo, band) + r;
+      for (let x = 0; x < g.W; x++) g.luma[y * g.W + x] = bits[p++];
+    }
+  }
+  function writeChromaPlane(g, geo, bits) {
+    const bw = g.W >> 1;
+    const bh = g.W - 16 >> 1;
+    let p = 0;
+    for (let by = 0; by < bh; by++) {
+      for (let bx = 0; bx < bw; bx++) {
+        const v = bits[p++];
+        for (let dy = 0; dy < 2; dy++) {
+          for (let dx = 0; dx < 2; dx++) {
+            g.blue[(8 + by * 2 + dy) * g.W + bx * 2 + dx] = v;
           }
         }
       }
-      if(go)this.pending=this.pending.filter(s=>s.rem.length>0);
     }
   }
-  assemble(){
-    const out=new Uint8Array(this.K*this.S);
-    for(let i=0;i<this.K;i++)if(this.blocks[i])out.set(this.blocks[i],i*this.S);
-    return out.subarray(0,this.total);
-  }
-}
-
-/* ============================================================
-   2. Geometry
-   Grid W x W cells.
-     rows 0..7        top zone: TL marker, calibration strip, TR marker
-     rows 8..W-9      band region, 4 bands of (W-16)/4 rows
-     rows W-8..W-1    bottom zone: BL marker, BR marker (small, orientation key)
-   Luma cells carry 4 band symbols. Blue axis at 2x2 pitch carries 1 more.
-   ============================================================ */
-const HDR_BITS=72, CRC_BITS=32, NBANDS=4;
-function geom(W){
-  const bandH=(W-16)/NBANDS;
-  const cap=W*bandH;                        // luma cells per band
-  const capC=(W>>1)*((W-16)>>1);            // chroma blocks over whole band region
-  const symBytes=Math.max(8,(Math.floor((Math.min(cap,capC)-HDR_BITS-CRC_BITS)/8)>>3)<<3);
-  return {W,bandH,cap,capC,symBytes,
-    corners:[[4,4],[W-4,4],[W-4,W-4],[4,W-4]]}; // TL,TR,BR,BL in cell coords
-}
-
-/* pack one band: 3x repeated 24-bit header, payload, CRC32 over header+payload */
-function packBand(type,esi,band,payload,capacity){
-  const bits=new Uint8Array(capacity);
-  const hdr=new Uint8Array([((type&0x0F)<<4)|(band&0x0F),(esi>>8)&0xFF,esi&0xFF]);
-  let p=0;
-  const put=(v,n)=>{for(let i=n-1;i>=0;i--)bits[p++]=(v>>i)&1};
-  for(let r=0;r<3;r++)for(const b of hdr)put(b,8);
-  for(const b of payload)put(b,8);
-  const all=new Uint8Array(hdr.length+payload.length);all.set(hdr);all.set(payload,3);
-  put(crc32(all),32);
-  const rng=mulberry32((esi<<4|band)+7);
-  while(p<capacity)bits[p++]=rng()<0.5?0:1;      // pad keeps contrast lively
-  return bits;
-}
-function unpackBand(bits,symBytes){
-  const need=HDR_BITS+symBytes*8+CRC_BITS;
-  if(bits.length<need)return null;
-  const hdr=new Uint8Array(3);
-  for(let i=0;i<24;i++){                          // majority vote over 3 copies
-    const s=bits[i]+bits[i+24]+bits[i+48];
-    if(s>=2)hdr[i>>3]|=128>>(i&7);
-  }
-  let p=72;
-  const pay=new Uint8Array(symBytes);
-  for(let i=0;i<symBytes*8;i++){if(bits[p++])pay[i>>3]|=128>>(i&7)}
-  let c=0;for(let i=0;i<32;i++)c=((c<<1)|bits[p++])>>>0;
-  const all=new Uint8Array(3+symBytes);all.set(hdr);all.set(pay,3);
-  if(crc32(all)!==(c>>>0))return null;
-  return {type:hdr[0]>>4,band:hdr[0]&0x0F,esi:(hdr[1]<<8)|hdr[2],payload:pay};
-}
-
-/* manifest, sent uncoded so a fresh receiver can bootstrap */
-function packManifest(total,K,symBytes,fileCRC,name,size){
-  const nm=new TextEncoder().encode(name.slice(0,16));
-  const b=new Uint8Array(size);
-  b[0]=0x4C;b[1]=1;
-  b[2]=(total>>>24)&255;b[3]=(total>>>16)&255;b[4]=(total>>>8)&255;b[5]=total&255;
-  b[6]=(K>>8)&255;b[7]=K&255;b[8]=(symBytes>>8)&255;b[9]=symBytes&255;
-  b[10]=(fileCRC>>>24)&255;b[11]=(fileCRC>>>16)&255;b[12]=(fileCRC>>>8)&255;b[13]=fileCRC&255;
-  b[14]=nm.length;b.set(nm.subarray(0,Math.min(nm.length,size-15)),15);
-  return b;
-}
-function readManifest(b){
-  if(b[0]!==0x4C||b[1]!==1)return null;
-  const total=(b[2]<<24|b[3]<<16|b[4]<<8|b[5])>>>0;
-  const K=(b[6]<<8)|b[7], sym=(b[8]<<8)|b[9];
-  const fc=(b[10]<<24|b[11]<<16|b[12]<<8|b[13])>>>0;
-  const n=b[14];
-  if(!K||!sym||K>65535)return null;
-  const name=new TextDecoder().decode(b.subarray(15,15+Math.min(n,16)));
-  return {total,K,sym,fileCRC:fc,name:name||"payload.bin"};
-}
-
-/* ============================================================
-   3. Transmitter
-   ============================================================ */
-const PAL=[[11,11,15],[255,229,0],[27,44,255],[255,255,255]]; // [luma][blue]
-const txCanvas=document.getElementById('txCanvas'),txCtx=txCanvas.getContext('2d');
-const cellCv=document.createElement('canvas'),cellCtx=cellCv.getContext('2d');
-let TX=null,txTimer=null,txFrame=0,txBytes=0,txT0=0;
-
-const DEMO="Lumen Link demo payload. A rateless code means the receiver never asks for a retransmission: it just keeps collecting distinct symbols until it has enough, and any symbol is as useful as any other. That property is what makes one screen able to feed three hundred phones at once with no back channel and no network.";
-
-function buildTX(bytes,name){
-  const W=+document.getElementById('gridSel').value;
-  const g=geom(W);
-  const enc=new LTEncoder(bytes,g.symBytes);
-  TX={g,enc,name,useChroma:document.getElementById('chromaSel').value==='1'};
-  cellCv.width=cellCv.height=W;
-  const px=Math.max(4,Math.floor(512/W));
-  txCanvas.width=txCanvas.height=W*px;
-  txCtx.imageSmoothingEnabled=false;
-  document.getElementById('txFile').textContent=name;
-  document.getElementById('txK').textContent=enc.K;
-  document.getElementById('txSym').innerHTML=g.symBytes+'<small> B</small>';
-  drawFrame();
-}
-
-function drawFrame(){
-  const {g,enc}=TX,W=g.W;
-  const grid=new Uint8Array(W*W*2);            // [luma,blue] per cell
-  const set=(x,y,l,b)=>{const i=(y*W+x)*2;grid[i]=l;grid[i+1]=b};
-
-  // quiet field is white
-  for(let y=0;y<W;y++)for(let x=0;x<W;x++)set(x,y,1,1);
-
-  // registration marks. Three 6x6, one 4x4 that keys orientation.
-  const blk=(x0,y0,w,h)=>{for(let y=y0;y<y0+h;y++)for(let x=x0;x<x0+w;x++)set(x,y,0,0)};
-  blk(1,1,6,6); blk(W-7,1,6,6); blk(1,W-7,6,6); blk(W-6,W-6,4,4);
-
-  // calibration patches: the four palette extremes, every frame
-  const cw=Math.floor((W-18)/4);
-  for(let k=0;k<4;k++){
-    const l=k>>1,b=k&1;
-    for(let y=1;y<7;y++)for(let x=9+k*cw;x<9+(k+1)*cw;x++)set(x,y,l,b);
-  }
-
-  // four luma bands
-  let sent=0;
-  for(let bi=0;bi<NBANDS;bi++){
-    let bits;
-    if(bi===0&&txFrame%4===0){
-      bits=packBand(1,0,0,packManifest(enc.total,enc.K,g.symBytes,enc.fileCRC,TX.name,g.symBytes),g.cap);
-    }else{
-      const s=enc.next();sent++;
-      bits=packBand(0,s.esi,bi,s.data,g.cap);
-    }
-    let p=0;
-    for(let r=0;r<g.bandH;r++){
-      const y=8+bi*g.bandH+r;
-      for(let x=0;x<W;x++)grid[(y*W+x)*2]=bits[p++];
+  function fillChromaPlane(g) {
+    for (let y = 8; y < g.W - 8; y++) {
+      for (let x = 0; x < g.W; x++) g.blue[y * g.W + x] = 1;
     }
   }
 
-  // one enhancement symbol across the whole band region on the blue axis
-  if(TX.useChroma){
-    const s=enc.next();sent++;
-    const bits=packBand(0,s.esi,0,s.data,g.capC);
-    let p=0;
-    const bw=W>>1,bh=(W-16)>>1;
-    for(let by=0;by<bh;by++)for(let bx=0;bx<bw;bx++){
-      const v=bits[p++];
-      for(let dy=0;dy<2;dy++)for(let dx=0;dx<2;dx++)
-        grid[((8+by*2+dy)*W+bx*2+dx)*2+1]=v;
+  // src/core/transmitter.ts
+  var MANIFEST_INTERVAL = 4;
+  var Transmitter = class {
+    geometry;
+    encoder;
+    manifest;
+    sessionId;
+    enhancement;
+    frameIndex = 0;
+    closingIn = null;
+    constructor(payload2, opts) {
+      this.geometry = geometry(opts.grid);
+      this.encoder = new LTEncoder(payload2, this.geometry.symBytes);
+      this.enhancement = opts.enhancement ?? true;
+      const name = opts.name ?? "payload.bin";
+      this.sessionId = deriveSessionId(
+        this.encoder.fileCRC,
+        this.encoder.total,
+        name,
+        opts.nonce ?? 0
+      );
+      this.manifest = {
+        sessionId: this.sessionId,
+        total: this.encoder.total,
+        K: this.encoder.K,
+        symBytes: this.geometry.symBytes,
+        fileCRC: this.encoder.fileCRC,
+        name,
+        ...opts.contentType !== void 0 ? { contentType: opts.contentType } : {},
+        ...opts.set !== void 0 ? { set: opts.set } : {}
+      };
     }
-  }else{
-    // blue on everywhere in band region: base cells become pure black / white
-    for(let y=8;y<W-8;y++)for(let x=0;x<W;x++)grid[(y*W+x)*2+1]=1;
-  }
-
-  const img=cellCtx.createImageData(W,W);
-  for(let i=0;i<W*W;i++){
-    const c=PAL[grid[i*2]*1+grid[i*2+1]*2];
-    img.data[i*4]=c[0];img.data[i*4+1]=c[1];img.data[i*4+2]=c[2];img.data[i*4+3]=255;
-  }
-  cellCtx.putImageData(img,0,0);
-  txCtx.imageSmoothingEnabled=false;
-  txCtx.drawImage(cellCv,0,0,txCanvas.width,txCanvas.height);
-
-  txFrame++;txBytes+=sent*g.symBytes;
-  const dt=(performance.now()-txT0)/1000;
-  if(dt>0.6)document.getElementById('txRate').innerHTML=Math.round(txBytes/dt)+'<small> B/s</small>';
-}
-
-document.getElementById('txBtn').onclick=()=>{
-  if(txTimer){clearInterval(txTimer);txTimer=null;
-    document.getElementById('txBtn').textContent='Start transmit';
-    document.getElementById('txState').textContent='paused';return}
-  txFrame=0;txBytes=0;txT0=performance.now();
-  const fps=+document.getElementById('fpsSel').value;
-  txTimer=setInterval(drawFrame,1000/fps);
-  document.getElementById('txBtn').textContent='Pause';
-  document.getElementById('txState').textContent='transmitting @ '+fps+' fps';
-};
-document.getElementById('fileIn').onchange=e=>{
-  const f=e.target.files[0];if(!f)return;
-  f.arrayBuffer().then(ab=>{buildTX(new Uint8Array(ab),f.name)});
-};
-['gridSel','chromaSel'].forEach(id=>document.getElementById(id).onchange=()=>{
-  const f=document.getElementById('fileIn').files[0];
-  if(f)f.arrayBuffer().then(ab=>buildTX(new Uint8Array(ab),f.name));
-  else buildTX(new TextEncoder().encode(DEMO),'demo.txt');
-});
-
-/* ============================================================
-   4. Vision: threshold, blobs, corners, homography
-   ============================================================ */
-function otsu(gray){
-  const h=new Int32Array(256);for(let i=0;i<gray.length;i++)h[gray[i]]++;
-  let sum=0;for(let i=0;i<256;i++)sum+=i*h[i];
-  let sB=0,wB=0,max=0,th=128,N=gray.length;
-  for(let t=0;t<256;t++){
-    wB+=h[t];if(!wB)continue;const wF=N-wB;if(!wF)break;
-    sB+=t*h[t];
-    const mB=sB/wB,mF=(sum-sB)/wF,v=wB*wF*(mB-mF)*(mB-mF);
-    if(v>max){max=v;th=t}
-  }
-  return th;
-}
-function blobs(gray,w,h,th){
-  const lab=new Int32Array(w*h),out=[],st=new Int32Array(w*h);
-  let n=0;
-  for(let i=0;i<w*h;i++){
-    if(gray[i]>=th||lab[i])continue;
-    n++;let sp=0;st[sp++]=i;lab[i]=n;
-    let a=0,sx=0,sy=0,x0=w,x1=0,y0=h,y1=0;
-    while(sp){
-      const p=st[--sp],px=p%w,py=(p/w)|0;
-      a++;sx+=px;sy+=py;
-      if(px<x0)x0=px;if(px>x1)x1=px;if(py<y0)y0=py;if(py>y1)y1=py;
-      if(px>0&&!lab[p-1]&&gray[p-1]<th){lab[p-1]=n;st[sp++]=p-1}
-      if(px<w-1&&!lab[p+1]&&gray[p+1]<th){lab[p+1]=n;st[sp++]=p+1}
-      if(py>0&&!lab[p-w]&&gray[p-w]<th){lab[p-w]=n;st[sp++]=p-w}
-      if(py<h-1&&!lab[p+w]&&gray[p+w]<th){lab[p+w]=n;st[sp++]=p+w}
+    get frames() {
+      return this.frameIndex;
     }
-    const bw=x1-x0+1,bh=y1-y0+1,ar=bw/bh,fill=a/(bw*bh);
-    if(a<16||a>w*h*0.05)continue;
-    if(bw<3||bh<3||bw>w*0.35||bh>h*0.35)continue;
-    if(ar<0.55||ar>1.8||fill<0.58)continue;
-    out.push({x:sx/a,y:sy/a,a});
-  }
-  return out;
-}
-function fourCorners(c){
-  if(c.length<4)return null;
-  let a=0,b=0,d=0,e=0;
-  for(let i=1;i<c.length;i++){
-    if(c[i].x+c[i].y<c[a].x+c[a].y)a=i;
-    if(c[i].x+c[i].y>c[b].x+c[b].y)b=i;
-    if(c[i].x-c[i].y>c[d].x-c[d].y)d=i;
-    if(c[i].x-c[i].y<c[e].x-c[e].y)e=i;
-  }
-  const idx=[a,d,b,e];                       // TL, TR, BR, BL by axis guess
-  if(new Set(idx).size<4)return null;
-  return idx.map(i=>c[i]);
-}
-function solve8(A,b){
-  const n=8,M=A.map((r,i)=>r.concat([b[i]]));
-  for(let c=0;c<n;c++){
-    let p=c;for(let r=c+1;r<n;r++)if(Math.abs(M[r][c])>Math.abs(M[p][c]))p=r;
-    if(Math.abs(M[p][c])<1e-9)return null;
-    [M[c],M[p]]=[M[p],M[c]];
-    for(let r=0;r<n;r++){
-      if(r===c)continue;const f=M[r][c]/M[c][c];
-      for(let k=c;k<=n;k++)M[r][k]-=f*M[c][k];
+    /** Announce that the fountain stops in `frames`. Advisory only — see
+     *  SPEC.md §6; a receiver must never depend on observing it. */
+    announceClose(frames) {
+      this.closingIn = Math.max(0, Math.min(65535, frames));
     }
-  }
-  return M.map((r,i)=>r[n]/r[i][i]===undefined?0:r[n]/M[i][i]);
-}
-function homography(src,dst){
-  const A=[],b=[];
-  for(let i=0;i<4;i++){
-    const x=src[i][0],y=src[i][1],u=dst[i].x,v=dst[i].y;
-    A.push([x,y,1,0,0,0,-x*u,-y*u]);b.push(u);
-    A.push([0,0,0,x,y,1,-x*v,-y*v]);b.push(v);
-  }
-  const h=solve8(A,b);if(!h)return null;h.push(1);return h;
-}
-const applyH=(h,x,y)=>{const d=h[6]*x+h[7]*y+h[8];return [(h[0]*x+h[1]*y+h[2])/d,(h[3]*x+h[4]*y+h[5])/d]};
-
-/* ============================================================
-   5. Receiver
-   ============================================================ */
-const rxVideo=document.getElementById('rxVideo'),rxSim=document.getElementById('rxSim');
-const rxOverlay=document.getElementById('rxOverlay'),ovCtx=rxOverlay.getContext('2d');
-const capCv=document.createElement('canvas'),capCtx=capCv.getContext('2d',{willReadFrequently:true});
-const scope=document.getElementById('scope'),scCtx=scope.getContext('2d');
-
-let RX=null,rxRAF=null,rxMode=null,stream=null;
-const hist=[];
-function resetRX(){
-  RX={dec:null,man:null,frames:0,locked:0,bandTry:0,bandOK:0,chTry:0,chOK:0,
-      buf:[],bytes:0,t0:performance.now(),sep:0,rot:0};
-  hist.length=0;
-  document.getElementById('doneBox').style.display='none';
-  document.getElementById('pFill').style.width='0%';
-  document.getElementById('pTxt').textContent='no manifest yet';
-  document.getElementById('pPct').textContent='';
-}
-
-function sampleGrid(data,w,h,H,g){
-  const W=g.W;
-  const Y=new Float32Array(W*W),C=new Float32Array(W*W);
-  for(let cy=0;cy<W;cy++)for(let cx=0;cx<W;cx++){
-    const [px,py]=applyH(H,cx+0.5,cy+0.5);
-    const ix=Math.round(px),iy=Math.round(py);
-    if(ix<0||iy<0||ix>=w||iy>=h){Y[cy*W+cx]=NaN;continue}
-    const o=(iy*w+ix)*4,r=data[o],gg=data[o+1],bb=data[o+2];
-    Y[cy*W+cx]=0.299*r+0.587*gg+0.114*bb;
-    C[cy*W+cx]=bb-(r+gg)/2;                 // blue/yellow axis, differential
-  }
-  return {Y,C};
-}
-
-function decodeFrame(data,w,h,corners,g){
-  const W=g.W;
-  // try the size-keyed orientation first, then the other three
-  const order=[0,1,2,3].sort((a,b)=>{
-    const sa=corners[(a+2)%4].a,sb=corners[(b+2)%4].a;return sa-sb;
-  });
-  const rots=[RX.rot,0,1,2,3];
-  for(const rot of rots){
-    const dst=[0,1,2,3].map(i=>corners[(i+rot)%4]);
-    const H=homography(g.corners,dst);
-    if(!H)continue;
-    const {Y,C}=sampleGrid(data,w,h,H,g);
-    if(Number.isNaN(Y[0]))continue;
-
-    // calibration: four patches in the top strip
-    const cw=Math.floor((W-18)/4);
-    const ref=[];
-    for(let k=0;k<4;k++){
-      let sy=0,sc=0,n=0;
-      for(let y=2;y<6;y++)for(let x=9+k*cw+1;x<9+(k+1)*cw-1;x++){
-        sy+=Y[y*W+x];sc+=C[y*W+x];n++;
+    /** Render the next frame. */
+    next() {
+      const geo = this.geometry;
+      const sid8 = shortId(this.sessionId);
+      const grid = createGrid(geo.W);
+      drawQuietStructure(grid);
+      let symbols = 0;
+      let manifestSent = false;
+      for (let band = 0; band < NBANDS; band++) {
+        let bits;
+        if (band === 0 && this.closingIn !== null) {
+          const payload2 = new Uint8Array(geo.symBytes);
+          payload2[0] = this.closingIn >>> 8 & 255;
+          payload2[1] = this.closingIn & 255;
+          bits = packBand(FrameType.Close, band, 0, sid8, payload2, geo.bandCapacity);
+        } else if (band === 0 && this.frameIndex % MANIFEST_INTERVAL === 0) {
+          const payload2 = packManifest(this.manifest, geo.symBytes);
+          bits = packBand(FrameType.Manifest, band, 0, sid8, payload2, geo.bandCapacity);
+          manifestSent = true;
+        } else {
+          const s = this.encoder.next();
+          symbols++;
+          bits = packBand(FrameType.Data, band, s.esi, sid8, s.data, geo.bandCapacity);
+        }
+        writeLumaBand(grid, geo, band, bits);
       }
-      ref.push({y:sy/n,c:sc/n});
-    }
-    const yTh=((ref[0].y+ref[1].y)/2+(ref[2].y+ref[3].y)/2)/2;
-    const cOff=(ref[0].c+ref[2].c)/2, cOn=(ref[1].c+ref[3].c)/2;
-    const cTh=(cOff+cOn)/2, sep=Math.abs(cOn-cOff);
-    if(ref[2].y-ref[0].y<18)continue;           // luma polarity implausible
-
-    const got=[];let bTry=0,bOK=0;
-    for(let bi=0;bi<NBANDS;bi++){
-      const bits=new Uint8Array(g.cap);let p=0;
-      for(let r=0;r<g.bandH;r++){const y=8+bi*g.bandH+r;
-        for(let x=0;x<W;x++)bits[p++]=Y[y*W+x]>yTh?1:0}
-      bTry++;
-      const d=unpackBand(bits,g.symBytes);
-      if(d){bOK++;got.push({...d,layer:'base'})}
-    }
-    if(bOK===0&&rot!==rots[rots.length-1])continue;   // wrong orientation, try next
-    RX.rot=rot;
-
-    // enhancement layer, only if the palette actually separated
-    let cTry=0,cOK=0;
-    if(sep>16){
-      cTry=1;
-      const bw=W>>1,bh=(W-16)>>1,bits=new Uint8Array(g.capC);let p=0;
-      for(let by=0;by<bh;by++)for(let bx=0;bx<bw;bx++){
-        let s=0;
-        for(let dy=0;dy<2;dy++)for(let dx=0;dx<2;dx++)s+=C[(8+by*2+dy)*W+bx*2+dx];
-        bits[p++]=(s/4)>cTh?1:0;
+      if (this.enhancement) {
+        const s = this.encoder.next();
+        symbols++;
+        const bits = packBand(
+          FrameType.Data,
+          CHROMA_BAND,
+          s.esi,
+          sid8,
+          s.data,
+          geo.chromaCapacity
+        );
+        writeChromaPlane(grid, geo, bits);
+      } else {
+        fillChromaPlane(grid);
       }
-      const d=unpackBand(bits,g.symBytes);
-      if(d&&d.type===0){cOK=1;got.push({...d,layer:'enh'})}
+      const stats = { symbols, frameIndex: this.frameIndex, manifestSent };
+      this.frameIndex++;
+      if (this.closingIn !== null && this.closingIn > 0) this.closingIn--;
+      return { grid, stats };
     }
-    return {got,bTry,bOK,cTry,cOK,sep,H};
-  }
-  return null;
-}
-
-function ingest(res){
-  RX.bandTry+=res.bTry;RX.bandOK+=res.bOK;RX.chTry+=res.cTry;RX.chOK+=res.cOK;RX.sep=res.sep;
-  hist.push({b:res.bOK,t:res.bTry,c:res.cOK,ct:res.cTry});if(hist.length>140)hist.shift();
-  for(const s of res.got){
-    if(s.type===1){
-      if(!RX.man){
-        const m=readManifest(s.payload);
-        if(m){RX.man=m;RX.dec=new LTDecoder(m.K,m.sym,m.total,m.fileCRC);
-          for(const q of RX.buf)RX.dec.add(q.esi,q.payload);RX.buf=[];}
-      }
-      continue;
-    }
-    if(RX.dec){if(RX.dec.add(s.esi,s.payload))RX.bytes+=RX.dec.S}
-    else if(RX.buf.length<400)RX.buf.push(s);
-  }
-  if(RX.dec&&RX.dec.done)finish();
-}
-
-function finish(){
-  const out=RX.dec.assemble();
-  const ok=crc32(out)===RX.dec.fileCRC;
-  const box=document.getElementById('doneBox');
-  box.style.display='flex';
-  document.getElementById('doneName').textContent=
-    (ok?'✓ ':'✗ checksum mismatch: ')+RX.man.name+'  ·  '+RX.dec.total+' bytes  ·  '+
-    RX.frames+' frames  ·  '+((performance.now()-RX.t0)/1000).toFixed(1)+' s';
-  document.getElementById('dlBtn').onclick=()=>{
-    const a=document.createElement('a');
-    a.href=URL.createObjectURL(new Blob([out]));a.download=RX.man.name;a.click();
   };
-  stopRX();
-}
 
-function paintOverlay(H,g,w,h){
-  rxOverlay.width=w;rxOverlay.height=h;
-  ovCtx.clearRect(0,0,w,h);
-  if(!H)return;
-  ovCtx.lineWidth=2;ovCtx.strokeStyle='#FFE500';
-  ovCtx.beginPath();
-  const pts=[[0,0],[g.W,0],[g.W,g.W],[0,g.W]].map(p=>applyH(H,p[0],p[1]));
-  ovCtx.moveTo(pts[0][0],pts[0][1]);
-  for(let i=1;i<4;i++)ovCtx.lineTo(pts[i][0],pts[i][1]);
-  ovCtx.closePath();ovCtx.stroke();
-}
-
-function drawScope(){
-  const w=scope.width,h=scope.height;
-  scCtx.fillStyle='#FFFFFF';scCtx.fillRect(0,0,w,h);
-  const bw=w/140;
-  for(let i=0;i<hist.length;i++){
-    const e=hist[i],x=i*bw;
-    scCtx.fillStyle='#0B0B0F';scCtx.fillRect(x,0,Math.max(1,bw-0.6),h);
-    const yh=(e.b/Math.max(1,e.t))*(h-20);
-    scCtx.fillStyle='#FFE500';scCtx.fillRect(x,h-20-yh,Math.max(1,bw-0.6),yh);
-    if(e.ct){scCtx.fillStyle=e.c?'#1B2CFF':'#3A3D48';scCtx.fillRect(x,h-18,Math.max(1,bw-0.6),16)}
-  }
-  scCtx.strokeStyle='#D6D8DE';scCtx.beginPath();scCtx.moveTo(0,h-19.5);scCtx.lineTo(w,h-19.5);scCtx.stroke();
-}
-
-function tick(){
-  rxRAF=requestAnimationFrame(tick);
-  let src,sw,sh;
-  if(rxMode==='cam'){
-    if(rxVideo.readyState<2)return;
-    src=rxVideo;sw=rxVideo.videoWidth;sh=rxVideo.videoHeight;
-  }else{
-    if(!TX)return;
-    renderSim();src=rxSim;sw=rxSim.width;sh=rxSim.height;
-  }
-  const DW=480,DH=Math.round(DW*sh/sw);
-  capCv.width=DW;capCv.height=DH;
-  capCtx.drawImage(src,0,0,DW,DH);
-  const img=capCtx.getImageData(0,0,DW,DH),d=img.data;
-  const gray=new Uint8ClampedArray(DW*DH);
-  for(let i=0;i<gray.length;i++)gray[i]=(d[i*4]*77+d[i*4+1]*150+d[i*4+2]*29)>>8;
-
-  RX.frames++;
-  const cs=blobs(gray,DW,DH,otsu(gray));
-  const corners=fourCorners(cs);
-  let H=null;
-  if(corners&&TX){
-    const res=decodeFrame(d,DW,DH,corners,TX.g);
-    if(res){RX.locked++;H=res.H;ingest(res)}
-  }
-  paintOverlay(H,TX?TX.g:{W:64},DW,DH);
-  rxOverlay.style.width='100%';
-  if(RX.frames%3===0)updateMeters();
-}
-
-function updateMeters(){
-  const $=id=>document.getElementById(id);
-  $('mLock').textContent=RX.frames?Math.round(100*RX.locked/RX.frames)+'%':'–';
-  $('mBand').innerHTML=RX.bandTry?Math.round(100*RX.bandOK/RX.bandTry)+'<small> %</small>':'–<small> %</small>';
-  $('mChroma').innerHTML=RX.chTry?Math.round(100*RX.chOK/RX.chTry)+'<small> %</small>':'off<small></small>';
-  const dt=(performance.now()-RX.t0)/1000;
-  $('mRate').innerHTML=dt>1?Math.round(RX.bytes/dt)+'<small> B/s</small>':'–<small> B/s</small>';
-  $('sepTxt').textContent='Δ '+RX.sep.toFixed(1)+(RX.sep>16?'  (usable)':'  (below floor)');
-  if(RX.dec){
-    const pct=100*RX.dec.have/RX.dec.K;
-    $('pFill').style.width=pct.toFixed(1)+'%';
-    $('pFill').className='fill'+(RX.chOK>0?' blue':'');
-    $('pTxt').textContent=RX.man.name+'  ·  '+RX.dec.have+' / '+RX.dec.K+' blocks';
-    $('pPct').textContent=pct.toFixed(0)+'%';
-  }
-  drawScope();
-}
-
-/* loopback camera simulator: skew, defocus, noise, green ambient */
-function renderSim(){
-  const S=520;rxSim.width=S;rxSim.height=Math.round(S*0.75);
-  const c=rxSim.getContext('2d');
-  const rot=(+document.getElementById('simRot').value)*Math.PI/180;
-  const blur=(+document.getElementById('simBlur').value)/10;
-  c.setTransform(1,0,0,1,0,0);
-  c.fillStyle='#3a3a3a';c.fillRect(0,0,rxSim.width,rxSim.height);
-  c.filter=blur>0.05?`blur(${blur.toFixed(2)}px)`:'none';
-  c.translate(rxSim.width/2,rxSim.height/2);c.rotate(rot);
-  const sz=rxSim.height*0.86;
-  c.drawImage(txCanvas,-sz/2,-sz/2,sz,sz);
-  c.filter='none';c.setTransform(1,0,0,1,0,0);
-  const noise=+document.getElementById('simNoise').value;
-  const tint=(+document.getElementById('simTint').value)/100;
-  if(noise>0||tint>0){
-    const im=c.getImageData(0,0,rxSim.width,rxSim.height),p=im.data;
-    for(let i=0;i<p.length;i+=4){
-      if(tint>0){p[i]*=(1-tint*0.75);p[i+2]*=(1-tint*0.75)}   // AWB pulls R,B down
-      if(noise>0){const n=(Math.random()-0.5)*noise*2;p[i]+=n;p[i+1]+=n;p[i+2]+=n}
+  // src/vision/homography.ts
+  function solve8(A, b) {
+    const n = 8;
+    const M = A.map((row, i) => [...row, b[i]]);
+    for (let col = 0; col < n; col++) {
+      let pivot = col;
+      for (let r = col + 1; r < n; r++) {
+        if (Math.abs(M[r][col]) > Math.abs(M[pivot][col])) pivot = r;
+      }
+      if (Math.abs(M[pivot][col]) < 1e-9) return null;
+      [M[col], M[pivot]] = [M[pivot], M[col]];
+      for (let r = 0; r < n; r++) {
+        if (r === col) continue;
+        const f = M[r][col] / M[col][col];
+        for (let k = col; k <= n; k++) M[r][k] -= f * M[col][k];
+      }
     }
-    c.putImageData(im,0,0);
+    return M.map((row, i) => row[n] / M[i][i]);
   }
-}
-
-function startRX(mode){
-  resetRX();rxMode=mode;
-  rxVideo.style.display=mode==='cam'?'block':'none';
-  rxSim.style.display=mode==='cam'?'none':'block';
-  document.getElementById('simRow').style.display=mode==='cam'?'none':'flex';
-  document.getElementById('rxStop').disabled=false;
-  document.getElementById('rxState').textContent=mode==='cam'?'camera live':'loopback';
-  if(!rxRAF)tick();
-}
-function stopRX(){
-  if(rxRAF){cancelAnimationFrame(rxRAF);rxRAF=null}
-  if(stream){stream.getTracks().forEach(t=>t.stop());stream=null}
-  document.getElementById('rxStop').disabled=true;
-  document.getElementById('rxState').textContent='stopped';
-}
-document.getElementById('camBtn').onclick=async()=>{
-  const err=document.getElementById('rxErr');err.style.display='none';
-  try{
-    stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment',width:{ideal:1280},height:{ideal:960}}});
-    rxVideo.srcObject=stream;await rxVideo.play();
-    startRX('cam');
-  }catch(e){
-    err.textContent='Camera unavailable here ('+e.name+'). Save this page and open it from disk, or use loopback to test the codec.';
-    err.style.display='block';
+  function homography(src, dst) {
+    const A = [];
+    const b = [];
+    for (let i = 0; i < 4; i++) {
+      const [x, y] = src[i];
+      const { x: u, y: v } = dst[i];
+      A.push([x, y, 1, 0, 0, 0, -x * u, -y * u]);
+      b.push(u);
+      A.push([0, 0, 0, x, y, 1, -x * v, -y * v]);
+      b.push(v);
+    }
+    const h = solve8(A, b);
+    return h ? [...h, 1] : null;
   }
-};
-document.getElementById('loopBtn').onclick=()=>startRX('loop');
-document.getElementById('rxStop').onclick=stopRX;
-['simNoise','simBlur','simTint','simRot'].forEach(id=>{
-  const el=document.getElementById(id),o={simNoise:'vNoise',simBlur:'vBlur',simTint:'vTint',simRot:'vRot'}[id];
-  const upd=()=>document.getElementById(o).textContent=id==='simBlur'?(el.value/10).toFixed(1):el.value;
-  el.oninput=upd;upd();
-});
+  function applyHomography(h, x, y) {
+    const w = h[6] * x + h[7] * y + h[8];
+    return [(h[0] * x + h[1] * y + h[2]) / w, (h[3] * x + h[4] * y + h[5]) / w];
+  }
 
-/* boot */
-buildTX(new TextEncoder().encode(DEMO),'demo.txt');
-resetRX();
-drawScope();
+  // src/vision/decode.ts
+  var CHROMA_FLOOR = 16;
+  var LUMA_POLARITY_FLOOR = 18;
+  function sampleGrid(img, h, geo) {
+    const { data, width, height } = img;
+    const W = geo.W;
+    const luma = new Float32Array(W * W);
+    const chroma = new Float32Array(W * W);
+    for (let cy = 0; cy < W; cy++) {
+      for (let cx = 0; cx < W; cx++) {
+        const [px, py] = applyHomography(h, cx + 0.5, cy + 0.5);
+        const ix = Math.round(px);
+        const iy = Math.round(py);
+        if (ix < 0 || iy < 0 || ix >= width || iy >= height) return null;
+        const o = (iy * width + ix) * 4;
+        const r = data[o];
+        const g = data[o + 1];
+        const b = data[o + 2];
+        luma[cy * W + cx] = 0.299 * r + 0.587 * g + 0.114 * b;
+        chroma[cy * W + cx] = b - (r + g) / 2;
+      }
+    }
+    return { luma, chroma };
+  }
+  function calibrate(s, geo) {
+    const W = geo.W;
+    const cw = calibrationPatchWidth(W);
+    const refs = [];
+    for (let k = 0; k < 4; k++) {
+      let sl = 0;
+      let sc = 0;
+      let n = 0;
+      for (let y = 2; y < 6; y++) {
+        for (let x = 9 + k * cw + 1; x < 9 + (k + 1) * cw - 1; x++) {
+          sl += s.luma[y * W + x];
+          sc += s.chroma[y * W + x];
+          n++;
+        }
+      }
+      refs.push({ luma: sl / n, chroma: sc / n });
+    }
+    const [black, blue, yellow, white] = refs;
+    const dark = (black.luma + blue.luma) / 2;
+    const bright = (yellow.luma + white.luma) / 2;
+    const darkGap = blue.chroma - black.chroma;
+    const brightGap = white.chroma - yellow.chroma;
+    return {
+      lumaThreshold: (dark + bright) / 2,
+      chromaDarkThreshold: (black.chroma + blue.chroma) / 2,
+      chromaBrightThreshold: (yellow.chroma + white.chroma) / 2,
+      chromaDarkScale: Math.max(1, Math.abs(darkGap) / 2),
+      chromaBrightScale: Math.max(1, Math.abs(brightGap) / 2),
+      // The layer is only as readable as its weaker pair, so report that
+      // rather than the flattering average.
+      separation: Math.min(Math.abs(darkGap), Math.abs(brightGap)),
+      plausible: yellow.luma - black.luma >= LUMA_POLARITY_FLOOR
+    };
+  }
+  function rotationFromMarkers(corners) {
+    let smallest = 0;
+    for (let i = 1; i < 4; i++) if (corners[i].area < corners[smallest].area) smallest = i;
+    return (smallest - 2 + 4) % 4;
+  }
+  var FrameDecoder = class {
+    /** Last rotation that produced a passing CRC; tried first next time. */
+    rotationHint = null;
+    geometry;
+    constructor(geometry2) {
+      this.geometry = geometry2;
+    }
+    decode(img, corners) {
+      const geo = this.geometry;
+      const candidates = [];
+      const push = (r) => {
+        if (!candidates.includes(r)) candidates.push(r);
+      };
+      if (this.rotationHint !== null) push(this.rotationHint);
+      push(rotationFromMarkers(corners));
+      for (let r = 0; r < 4; r++) push(r);
+      for (let ci = 0; ci < candidates.length; ci++) {
+        const rotation = candidates[ci];
+        const dst = [0, 1, 2, 3].map((i) => corners[(i + rotation) % 4]);
+        const h = homography(geo.corners, dst);
+        if (!h) continue;
+        const sampled = sampleGrid(img, h, geo);
+        if (!sampled) continue;
+        const cal = calibrate(sampled, geo);
+        if (!cal.plausible) continue;
+        const frames = [];
+        let bandsPassed = 0;
+        for (let band = 0; band < NBANDS; band++) {
+          const bits = new Uint8Array(geo.bandCapacity);
+          let p = 0;
+          for (let r = 0; r < geo.bandH; r++) {
+            const y = bandRow(geo, band) + r;
+            for (let x = 0; x < geo.W; x++) {
+              bits[p++] = sampled.luma[y * geo.W + x] > cal.lumaThreshold ? 1 : 0;
+            }
+          }
+          const frame = unpackBand(bits, band, geo.symBytes);
+          if (frame && frame.band === band) {
+            bandsPassed++;
+            frames.push(frame);
+          }
+        }
+        if (bandsPassed === 0 && ci < candidates.length - 1) continue;
+        this.rotationHint = bandsPassed > 0 ? rotation : this.rotationHint;
+        let chromaTried = 0;
+        let chromaPassed = 0;
+        if (cal.separation > CHROMA_FLOOR) {
+          chromaTried = 1;
+          const frame = this.readChroma(sampled, cal);
+          if (frame) {
+            chromaPassed = 1;
+            frames.push(frame);
+          }
+        }
+        return {
+          frames,
+          bandsTried: NBANDS,
+          bandsPassed,
+          chromaTried,
+          chromaPassed,
+          separation: cal.separation,
+          homography: h,
+          rotation
+        };
+      }
+      return null;
+    }
+    /**
+     * Read the blue plane at 2x2 pitch.
+     *
+     * Each cell is sliced against the threshold for its own luma class, and the
+     * four normalised margins are summed before the decision. Combining soft
+     * margins rather than hard votes avoids ties and keeps the extra spatial
+     * averaging that the coarse pitch is there to buy.
+     */
+    readChroma(s, cal) {
+      const geo = this.geometry;
+      const W = geo.W;
+      const bw = W >> 1;
+      const bh = W - 16 >> 1;
+      const bits = new Uint8Array(geo.chromaCapacity);
+      let p = 0;
+      for (let by = 0; by < bh; by++) {
+        for (let bx = 0; bx < bw; bx++) {
+          let margin = 0;
+          for (let dy = 0; dy < 2; dy++) {
+            for (let dx = 0; dx < 2; dx++) {
+              const i = (8 + by * 2 + dy) * W + bx * 2 + dx;
+              const bright = s.luma[i] > cal.lumaThreshold;
+              const threshold = bright ? cal.chromaBrightThreshold : cal.chromaDarkThreshold;
+              const scale = bright ? cal.chromaBrightScale : cal.chromaDarkScale;
+              margin += (s.chroma[i] - threshold) / scale;
+            }
+          }
+          bits[p++] = margin > 0 ? 1 : 0;
+        }
+      }
+      const frame = unpackBand(bits, CHROMA_BAND, geo.symBytes);
+      return frame && frame.band === CHROMA_BAND ? frame : null;
+    }
+  };
+
+  // src/vision/image.ts
+  function toGrayscale(img) {
+    const { data, width, height } = img;
+    const out = new Uint8ClampedArray(width * height);
+    for (let i = 0; i < out.length; i++) {
+      out[i] = data[i * 4] * 77 + data[i * 4 + 1] * 150 + data[i * 4 + 2] * 29 >> 8;
+    }
+    return out;
+  }
+
+  // src/vision/markers.ts
+  var MIN_AREA = 16;
+  var MAX_AREA_FRACTION = 0.05;
+  var MAX_EXTENT_FRACTION = 0.35;
+  var MIN_ASPECT = 0.55;
+  var MAX_ASPECT = 1.8;
+  var MIN_FILL = 0.58;
+  var RING_PAD = 2;
+  var MIN_RING_BRIGHT = 0.75;
+  function hasQuietRing(gray, w, h, threshold, minX, minY, maxX, maxY) {
+    const x0 = minX - RING_PAD;
+    const x1 = maxX + RING_PAD;
+    const y0 = minY - RING_PAD;
+    const y1 = maxY + RING_PAD;
+    let bright = 0;
+    let sampled = 0;
+    const test = (x, y) => {
+      if (x < 0 || y < 0 || x >= w || y >= h) return;
+      sampled++;
+      if (gray[y * w + x] >= threshold) bright++;
+    };
+    for (let x = x0; x <= x1; x++) {
+      test(x, y0);
+      test(x, y1);
+    }
+    for (let y = y0 + 1; y < y1; y++) {
+      test(x0, y);
+      test(x1, y);
+    }
+    if (sampled < 8) return true;
+    return bright / sampled >= MIN_RING_BRIGHT;
+  }
+  function findMarkerBlobs(gray, w, h, threshold) {
+    const labels = new Int32Array(w * h);
+    const stack = new Int32Array(w * h);
+    const out = [];
+    let label = 0;
+    for (let seed = 0; seed < w * h; seed++) {
+      if (gray[seed] >= threshold || labels[seed]) continue;
+      label++;
+      let sp = 0;
+      stack[sp++] = seed;
+      labels[seed] = label;
+      let area = 0;
+      let sx = 0;
+      let sy = 0;
+      let minX = w;
+      let maxX = 0;
+      let minY = h;
+      let maxY = 0;
+      while (sp > 0) {
+        const p = stack[--sp];
+        const px = p % w;
+        const py = p / w | 0;
+        area++;
+        sx += px;
+        sy += py;
+        if (px < minX) minX = px;
+        if (px > maxX) maxX = px;
+        if (py < minY) minY = py;
+        if (py > maxY) maxY = py;
+        if (px > 0 && !labels[p - 1] && gray[p - 1] < threshold) {
+          labels[p - 1] = label;
+          stack[sp++] = p - 1;
+        }
+        if (px < w - 1 && !labels[p + 1] && gray[p + 1] < threshold) {
+          labels[p + 1] = label;
+          stack[sp++] = p + 1;
+        }
+        if (py > 0 && !labels[p - w] && gray[p - w] < threshold) {
+          labels[p - w] = label;
+          stack[sp++] = p - w;
+        }
+        if (py < h - 1 && !labels[p + w] && gray[p + w] < threshold) {
+          labels[p + w] = label;
+          stack[sp++] = p + w;
+        }
+      }
+      const bw = maxX - minX + 1;
+      const bh = maxY - minY + 1;
+      if (area < MIN_AREA || area > w * h * MAX_AREA_FRACTION) continue;
+      if (bw < 3 || bh < 3 || bw > w * MAX_EXTENT_FRACTION || bh > h * MAX_EXTENT_FRACTION) continue;
+      const aspect = bw / bh;
+      if (aspect < MIN_ASPECT || aspect > MAX_ASPECT) continue;
+      if (area / (bw * bh) < MIN_FILL) continue;
+      if (!hasQuietRing(gray, w, h, threshold, minX, minY, maxX, maxY)) continue;
+      out.push({ x: sx / area, y: sy / area, area });
+    }
+    return out;
+  }
+  function orderCorners(blobs) {
+    if (blobs.length < 4) return null;
+    let tl = 0;
+    let br = 0;
+    let tr = 0;
+    let bl = 0;
+    for (let i = 1; i < blobs.length; i++) {
+      const b = blobs[i];
+      if (b.x + b.y < blobs[tl].x + blobs[tl].y) tl = i;
+      if (b.x + b.y > blobs[br].x + blobs[br].y) br = i;
+      if (b.x - b.y > blobs[tr].x - blobs[tr].y) tr = i;
+      if (b.x - b.y < blobs[bl].x - blobs[bl].y) bl = i;
+    }
+    const idx = [tl, tr, br, bl];
+    if (new Set(idx).size < 4) return null;
+    return idx.map((i) => blobs[i]);
+  }
+
+  // src/vision/threshold.ts
+  function otsu(gray) {
+    const hist = new Int32Array(256);
+    for (let i = 0; i < gray.length; i++) hist[gray[i]]++;
+    let total = 0;
+    for (let i = 0; i < 256; i++) total += i * hist[i];
+    const n = gray.length;
+    let sumBelow = 0;
+    let weightBelow = 0;
+    let best = 0;
+    let threshold = 128;
+    for (let t = 0; t < 256; t++) {
+      weightBelow += hist[t];
+      if (weightBelow === 0) continue;
+      const weightAbove = n - weightBelow;
+      if (weightAbove === 0) break;
+      sumBelow += t * hist[t];
+      const meanBelow = sumBelow / weightBelow;
+      const meanAbove = (total - sumBelow) / weightAbove;
+      const variance = weightBelow * weightAbove * (meanBelow - meanAbove) ** 2;
+      if (variance > best) {
+        best = variance;
+        threshold = t;
+      }
+    }
+    return threshold;
+  }
+
+  // src/receiver.ts
+  var Receiver = class {
+    router;
+    stats = {
+      framesSeen: 0,
+      framesLocked: 0,
+      bandsTried: 0,
+      bandsPassed: 0,
+      chromaTried: 0,
+      chromaPassed: 0,
+      bytesAccepted: 0,
+      separation: 0
+    };
+    decoder;
+    finished = /* @__PURE__ */ new Set();
+    geometry;
+    constructor(geometry2, router = new SessionRouter()) {
+      this.geometry = geometry2;
+      this.decoder = new FrameDecoder(geometry2);
+      this.router = router;
+    }
+    get activeSession() {
+      return this.router.activeSession;
+    }
+    processFrame(img) {
+      this.stats.framesSeen++;
+      const gray = toGrayscale(img);
+      const blobs = findMarkerBlobs(gray, img.width, img.height, otsu(gray));
+      const corners = orderCorners(blobs);
+      if (!corners) return miss();
+      const readout = this.decoder.decode(img, corners);
+      if (!readout) return miss();
+      this.stats.framesLocked++;
+      this.stats.bandsTried += readout.bandsTried;
+      this.stats.bandsPassed += readout.bandsPassed;
+      this.stats.chromaTried += readout.chromaTried;
+      this.stats.chromaPassed += readout.chromaPassed;
+      this.stats.separation = readout.separation;
+      let switchedTo = null;
+      let completed = null;
+      for (const frame of readout.frames) {
+        const result = this.router.ingest(frame, this.geometry.symBytes);
+        switch (result.kind) {
+          case "accepted":
+            this.stats.bytesAccepted += result.session.decoder.symBytes;
+            if (result.session.decoder.complete) completed = result.session;
+            break;
+          case "manifest":
+            if (result.switched) switchedTo = result.session;
+            if (result.session.decoder.complete) completed = result.session;
+            break;
+          default:
+            break;
+        }
+      }
+      if (completed && this.finished.has(completed.manifest.sessionId)) completed = null;
+      if (completed) this.finished.add(completed.manifest.sessionId);
+      return {
+        locked: true,
+        homography: readout.homography,
+        bandsPassed: readout.bandsPassed,
+        bandsTried: readout.bandsTried,
+        chromaPassed: readout.chromaPassed,
+        chromaTried: readout.chromaTried,
+        separation: readout.separation,
+        switchedTo,
+        completed
+      };
+    }
+  };
+  function miss() {
+    return {
+      locked: false,
+      homography: null,
+      bandsPassed: 0,
+      bandsTried: 0,
+      chromaPassed: 0,
+      chromaTried: 0,
+      separation: 0,
+      switchedTo: null,
+      completed: null
+    };
+  }
+
+  // src/demo/render.ts
+  var GridRenderer = class {
+    constructor(canvas) {
+      this.canvas = canvas;
+      this.cells = document.createElement("canvas");
+      this.cellCtx = this.cells.getContext("2d");
+      this.ctx = canvas.getContext("2d");
+    }
+    canvas;
+    cells;
+    cellCtx;
+    ctx;
+    /** Size the backing store so one cell is a whole number of pixels. */
+    resize(W, target = 512) {
+      this.cells.width = W;
+      this.cells.height = W;
+      const px = Math.max(4, Math.floor(target / W));
+      this.canvas.width = W * px;
+      this.canvas.height = W * px;
+      this.ctx.imageSmoothingEnabled = false;
+    }
+    draw(grid) {
+      const W = grid.W;
+      const img = this.cellCtx.createImageData(W, W);
+      for (let i = 0; i < W * W; i++) {
+        const [r, g, b] = PALETTE[grid.luma[i] + 2 * grid.blue[i]];
+        img.data[i * 4] = r;
+        img.data[i * 4 + 1] = g;
+        img.data[i * 4 + 2] = b;
+        img.data[i * 4 + 3] = 255;
+      }
+      this.cellCtx.putImageData(img, 0, 0);
+      this.ctx.imageSmoothingEnabled = false;
+      this.ctx.drawImage(this.cells, 0, 0, this.canvas.width, this.canvas.height);
+    }
+  };
+  function drawLockOverlay(canvas, h, W, width, height) {
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, width, height);
+    if (!h) return;
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = "#FFE500";
+    ctx.beginPath();
+    const pts = [[0, 0], [W, 0], [W, W], [0, W]].map(
+      ([x, y]) => applyHomography(h, x, y)
+    );
+    ctx.moveTo(pts[0][0], pts[0][1]);
+    for (let i = 1; i < 4; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+    ctx.closePath();
+    ctx.stroke();
+  }
+  var SCOPE_SLOTS = 140;
+  function drawScope(canvas, history2) {
+    const ctx = canvas.getContext("2d");
+    const w = canvas.width;
+    const h = canvas.height;
+    ctx.fillStyle = "#FFFFFF";
+    ctx.fillRect(0, 0, w, h);
+    const bw = w / SCOPE_SLOTS;
+    for (let i = 0; i < history2.length; i++) {
+      const e = history2[i];
+      const x = i * bw;
+      const width = Math.max(1, bw - 0.6);
+      ctx.fillStyle = "#0B0B0F";
+      ctx.fillRect(x, 0, width, h);
+      const bar = e.bandsPassed / Math.max(1, e.bandsTried) * (h - 20);
+      ctx.fillStyle = "#FFE500";
+      ctx.fillRect(x, h - 20 - bar, width, bar);
+      if (e.chromaTried) {
+        ctx.fillStyle = e.chromaPassed ? "#1B2CFF" : "#3A3D48";
+        ctx.fillRect(x, h - 18, width, 16);
+      }
+    }
+    ctx.strokeStyle = "#D6D8DE";
+    ctx.beginPath();
+    ctx.moveTo(0, h - 19.5);
+    ctx.lineTo(w, h - 19.5);
+    ctx.stroke();
+  }
+
+  // src/demo/loopback.ts
+  var LoopbackCamera = class {
+    constructor(canvas) {
+      this.canvas = canvas;
+      this.ctx = canvas.getContext("2d", { willReadFrequently: true });
+    }
+    canvas;
+    ctx;
+    render(source, p) {
+      const width = 520;
+      const height = Math.round(width * 0.75);
+      this.canvas.width = width;
+      this.canvas.height = height;
+      const ctx = this.ctx;
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.fillStyle = "#3a3a3a";
+      ctx.fillRect(0, 0, width, height);
+      ctx.filter = p.defocus > 0.05 ? `blur(${p.defocus.toFixed(2)}px)` : "none";
+      ctx.translate(width / 2, height / 2);
+      ctx.rotate(p.skew * Math.PI / 180);
+      const size = height * 0.86;
+      ctx.drawImage(source, -size / 2, -size / 2, size, size);
+      ctx.filter = "none";
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      if (p.noise > 0 || p.greenAmbient > 0) {
+        const image = ctx.getImageData(0, 0, width, height);
+        const d = image.data;
+        const tint = p.greenAmbient;
+        for (let i = 0; i < d.length; i += 4) {
+          if (tint > 0) {
+            d[i] *= 1 - tint;
+            d[i + 2] *= 1 - tint;
+          }
+          if (p.noise > 0) {
+            const n = (Math.random() - 0.5) * p.noise * 2;
+            d[i] += n;
+            d[i + 1] += n;
+            d[i + 2] += n;
+          }
+        }
+        ctx.putImageData(image, 0, 0);
+      }
+    }
+  };
+
+  // src/demo/main.ts
+  var $ = (id) => document.getElementById(id);
+  var DEMO_PAYLOADS = [
+    {
+      name: "fountain.txt",
+      text: "Lumen Link demo payload. A rateless code means the receiver never asks for a retransmission: it just keeps collecting distinct symbols until it has enough, and any symbol is as useful as any other. That property is what makes one screen able to feed three hundred phones at once with no back channel and no network."
+    },
+    {
+      name: "sessions.txt",
+      text: "This is a different file. Because every symbol carries a session id, the receiver can tell it apart from the previous one without ever seeing a begin or end marker. Swap back and forth: each file keeps its own progress, and a partly received one resumes where it left off rather than starting over."
+    }
+  ];
+  var txCanvas = $("txCanvas");
+  var renderer = new GridRenderer(txCanvas);
+  var tx = null;
+  var txTimer = null;
+  var txFrames = 0;
+  var txBytes = 0;
+  var txStart = 0;
+  var payload = new TextEncoder().encode(DEMO_PAYLOADS[0].text);
+  var payloadName = DEMO_PAYLOADS[0].name;
+  var demoIndex = 0;
+  function buildTransmitter() {
+    const grid = Number($("gridSel").value);
+    tx = new Transmitter(payload, {
+      grid,
+      name: payloadName,
+      enhancement: $("chromaSel").value === "1"
+    });
+    renderer.resize(grid);
+    $("txFile").textContent = payloadName;
+    $("txSession").textContent = tx.sessionId.toString(16).padStart(8, "0");
+    $("txK").textContent = String(tx.encoder.K);
+    $("txSym").innerHTML = `${tx.geometry.symBytes}<small> B</small>`;
+    txFrames = 0;
+    txBytes = 0;
+    txStart = performance.now();
+    rebuildReceiver(grid);
+    drawFrame();
+  }
+  function drawFrame() {
+    if (!tx) return;
+    const { grid, stats } = tx.next();
+    renderer.draw(grid);
+    txFrames++;
+    txBytes += stats.symbols * tx.geometry.symBytes;
+    const elapsed = (performance.now() - txStart) / 1e3;
+    if (elapsed > 0.6) {
+      $("txRate").innerHTML = `${Math.round(txBytes / elapsed)}<small> B/s</small>`;
+    }
+  }
+  function setTransmitting(on) {
+    if (txTimer !== null) {
+      clearInterval(txTimer);
+      txTimer = null;
+    }
+    if (on) {
+      const fps = Number($("fpsSel").value);
+      txStart = performance.now();
+      txFrames = 0;
+      txBytes = 0;
+      txTimer = window.setInterval(drawFrame, 1e3 / fps);
+      $("txBtn").textContent = "Pause";
+      $("txState").textContent = `transmitting @ ${fps} fps`;
+    } else {
+      $("txBtn").textContent = "Start transmit";
+      $("txState").textContent = "paused";
+    }
+  }
+  $("txBtn").onclick = () => setTransmitting(txTimer === null);
+  $("swapBtn").onclick = () => {
+    demoIndex = (demoIndex + 1) % DEMO_PAYLOADS.length;
+    const next = DEMO_PAYLOADS[demoIndex];
+    payload = new TextEncoder().encode(next.text);
+    payloadName = next.name;
+    $("fileIn").value = "";
+    buildTransmitter();
+  };
+  $("fileIn").onchange = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    void file.arrayBuffer().then((buf) => {
+      payload = new Uint8Array(buf);
+      payloadName = file.name;
+      buildTransmitter();
+    });
+  };
+  for (const id of ["gridSel", "chromaSel"]) {
+    $(id).onchange = () => buildTransmitter();
+  }
+  $("fpsSel").onchange = () => {
+    if (txTimer !== null) setTransmitting(true);
+  };
+  var rxVideo = $("rxVideo");
+  var rxSim = $("rxSim");
+  var rxOverlay = $("rxOverlay");
+  var scope = $("scope");
+  var loopback = new LoopbackCamera(rxSim);
+  var capture = document.createElement("canvas");
+  var captureCtx = capture.getContext("2d", { willReadFrequently: true });
+  var rx = null;
+  var rafId = null;
+  var mode = null;
+  var stream = null;
+  var rxStart = 0;
+  var history = [];
+  function rebuildReceiver(grid) {
+    rx = new Receiver(geometry(grid));
+    history = [];
+    rxStart = performance.now();
+    $("doneBox").style.display = "none";
+    $("pFill").style.width = "0%";
+    $("pTxt").textContent = "no manifest yet";
+    $("pPct").textContent = "";
+    drawScope(scope, history);
+  }
+  function simParams() {
+    return {
+      noise: Number($("simNoise").value),
+      defocus: Number($("simBlur").value) / 10,
+      greenAmbient: Number($("simTint").value) / 100,
+      skew: Number($("simRot").value)
+    };
+  }
+  function tick() {
+    rafId = requestAnimationFrame(tick);
+    if (!rx || !tx) return;
+    let source;
+    let sw;
+    let sh;
+    if (mode === "cam") {
+      if (rxVideo.readyState < 2) return;
+      source = rxVideo;
+      sw = rxVideo.videoWidth;
+      sh = rxVideo.videoHeight;
+    } else {
+      loopback.render(txCanvas, simParams());
+      source = rxSim;
+      sw = rxSim.width;
+      sh = rxSim.height;
+    }
+    const width = 480;
+    const height = Math.round(width * sh / sw);
+    capture.width = width;
+    capture.height = height;
+    captureCtx.drawImage(source, 0, 0, width, height);
+    const image = captureCtx.getImageData(0, 0, width, height);
+    const outcome = rx.processFrame(image);
+    history.push({
+      bandsPassed: outcome.bandsPassed,
+      bandsTried: outcome.bandsTried,
+      chromaPassed: outcome.chromaPassed,
+      chromaTried: outcome.chromaTried
+    });
+    if (history.length > SCOPE_SLOTS) history.shift();
+    drawLockOverlay(rxOverlay, outcome.homography, tx.geometry.W, width, height);
+    rxOverlay.style.width = "100%";
+    if (outcome.switchedTo) {
+      $("rxState").textContent = `new object: ${outcome.switchedTo.manifest.name}`;
+    }
+    if (outcome.completed) present(outcome.completed);
+    if (rx.stats.framesSeen % 3 === 0) updateMeters();
+  }
+  function updateMeters() {
+    if (!rx) return;
+    const s = rx.stats;
+    $("mLock").textContent = s.framesSeen ? `${Math.round(100 * s.framesLocked / s.framesSeen)}%` : "\u2013";
+    let bandsTried = 0;
+    let bandsPassed = 0;
+    let chromaTried = 0;
+    let chromaPassed = 0;
+    for (const e of history) {
+      bandsTried += e.bandsTried;
+      bandsPassed += e.bandsPassed;
+      chromaTried += e.chromaTried;
+      chromaPassed += e.chromaPassed;
+    }
+    $("mBand").innerHTML = bandsTried ? `${Math.round(100 * bandsPassed / bandsTried)}<small> %</small>` : "\u2013<small> %</small>";
+    $("mChroma").innerHTML = chromaTried ? `${Math.round(100 * chromaPassed / chromaTried)}<small> %</small>` : "off";
+    const elapsed = (performance.now() - rxStart) / 1e3;
+    $("mRate").innerHTML = elapsed > 1 ? `${Math.round(s.bytesAccepted / elapsed)}<small> B/s</small>` : "\u2013<small> B/s</small>";
+    $("sepTxt").textContent = `\u0394 ${s.separation.toFixed(1)}` + (s.separation > CHROMA_FLOOR ? "  (usable)" : "  (below floor)");
+    const session = rx.activeSession;
+    if (session) {
+      const pct = 100 * session.decoder.have / session.decoder.K;
+      $("pFill").style.width = `${pct.toFixed(1)}%`;
+      $("pFill").className = "fill" + (s.chromaPassed > 0 ? " blue" : "");
+      $("pTxt").textContent = `${session.manifest.name}  \xB7  ${session.decoder.have} / ${session.decoder.K} blocks` + (session.closingIn !== null ? `  \xB7  closing in ${session.closingIn}` : "");
+      $("pPct").textContent = `${pct.toFixed(0)}%`;
+    }
+    drawScope(scope, history);
+  }
+  function present(session) {
+    if (!rx) return;
+    const { bytes, ok } = session.decoder.verify();
+    const elapsed = ((performance.now() - rxStart) / 1e3).toFixed(1);
+    $("doneBox").style.display = "flex";
+    $("doneName").textContent = (ok ? "\u2713 " : "\u2717 checksum mismatch: ") + `${session.manifest.name}  \xB7  ${session.decoder.total} bytes  \xB7  ${rx.stats.framesSeen} frames  \xB7  ${elapsed} s`;
+    $("dlBtn").onclick = () => {
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(new Blob([bytes]));
+      a.download = session.manifest.name;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    };
+  }
+  function startReceive(next) {
+    mode = next;
+    rebuildReceiver(Number($("gridSel").value));
+    rxVideo.style.display = next === "cam" ? "block" : "none";
+    rxSim.style.display = next === "cam" ? "none" : "block";
+    $("simRow").style.display = next === "cam" ? "none" : "flex";
+    $("rxStop").disabled = false;
+    $("rxState").textContent = next === "cam" ? "camera live" : "loopback";
+    if (rafId === null) tick();
+  }
+  function stopReceive() {
+    if (rafId !== null) {
+      cancelAnimationFrame(rafId);
+      rafId = null;
+    }
+    if (stream) {
+      for (const track of stream.getTracks()) track.stop();
+      stream = null;
+    }
+    $("rxStop").disabled = true;
+    $("rxState").textContent = "stopped";
+  }
+  $("camBtn").onclick = async () => {
+    const err = $("rxErr");
+    err.style.display = "none";
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 960 } }
+      });
+      rxVideo.srcObject = stream;
+      await rxVideo.play();
+      startReceive("cam");
+    } catch (e) {
+      const name = e instanceof Error ? e.name : "unknown error";
+      err.textContent = `Camera unavailable here (${name}). Save this page and open it from disk, or use loopback to exercise the codec.`;
+      err.style.display = "block";
+    }
+  };
+  $("loopBtn").onclick = () => startReceive("loop");
+  $("rxStop").onclick = stopReceive;
+  for (const [input, label] of [
+    ["simNoise", "vNoise"],
+    ["simBlur", "vBlur"],
+    ["simTint", "vTint"],
+    ["simRot", "vRot"]
+  ]) {
+    const el = $(input);
+    const update = () => {
+      $(label).textContent = input === "simBlur" ? (Number(el.value) / 10).toFixed(1) : el.value;
+    };
+    el.oninput = update;
+    update();
+  }
+  buildTransmitter();
+})();
+
 </script>
 </body>
 </html>

@@ -1,0 +1,23 @@
+{
+  "name": "lumen-link",
+  "version": "0.2.0",
+  "description": "Rateless optical file transfer over a four-colour grid",
+  "scripts": {
+    "build": "node build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "tsc --noEmit && node --test test/*.test.ts",
+    "serve": "node build.mjs && http-server -p 8080 -c-1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/gefrituurdeaugurk/Lumen-Link.git"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^26.1.2",
+    "esbuild": "^0.28.1",
+    "typescript": "^7.0.2"
+  },
+  "type": "module",
+  "private": true
+}
