@@ -16,8 +16,12 @@
   "devDependencies": {
     "@types/node": "^26.1.2",
     "esbuild": "^0.28.1",
+    "http-server": "^14.1.1",
     "typescript": "^7.0.2"
   },
   "type": "module",
-  "private": true
+  "private": true,
+  "dependencies": {
+    "sh": "^0.0.3"
+  }
 }
