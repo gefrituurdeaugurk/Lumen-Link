@@ -791,6 +791,7 @@ Drag <b>Green ambient</b> up in loopback: separation on the scope drops, the blu
 
   // src/core/session.ts
   var DEFAULT_SESSION_CACHE = 4;
+  var MAX_SESSION_CACHE = 256;
   var PENDING_PER_SHORT_ID = 256;
   var PENDING_BUCKETS = 4;
   var utf82 = new TextEncoder();
@@ -860,6 +861,12 @@ Drag <b>Green ambient</b> up in loopback: separation on the scope drops, the blu
       const id = manifest.sessionId;
       const switched = this.active !== id;
       let session = this.sessions.get(id);
+      if (manifest.set) {
+        this.cacheSize = Math.max(
+          this.cacheSize,
+          Math.min(manifest.set.objCount, MAX_SESSION_CACHE)
+        );
+      }
       if (session) {
         this.touch(id);
       } else {

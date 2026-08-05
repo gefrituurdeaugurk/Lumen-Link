@@ -109,6 +109,33 @@ test("a corrupt segment fails the whole-set check", () => {
   assert.equal(last.verified, false);
 });
 
+test("a set larger than the session cache does not evict its own progress", () => {
+  const payload = randomBytes(4000, 31);
+  const tx = new SetTransmitter(payload, {
+    grid: 48,
+    name: "wide.bin",
+    segmentBytes: 500,
+    framesPerSegment: 2,
+  });
+  assert.equal(tx.objCount, 8, "more segments than the default four-session cache");
+
+  const rx = new Receiver(geometry(48));
+  const assembler = new SetAssembler();
+  let done: Uint8Array | null = null;
+
+  // Two frames per segment forces every segment to be partly decoded at once,
+  // which is exactly the case a fixed four-session cache would thrash.
+  for (let i = 0; i < 4000 && !done; i++) {
+    const outcome = rx.processFrame(renderGrid(tx.next().grid, { seed: i + 1 }));
+    if (!outcome.completed) continue;
+    const progress = assembler.add(outcome.completed.manifest, outcome.completed.decoder.verify().bytes);
+    if (progress?.bytes) done = progress.bytes;
+  }
+
+  assert.ok(done, "the set should reassemble despite the rotation");
+  assert.deepEqual(done, payload);
+});
+
 test("a segmented payload reassembles through the optical pipeline", () => {
   const payload = randomBytes(2400, 29);
   const tx = new SetTransmitter(payload, {

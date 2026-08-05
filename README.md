@@ -17,8 +17,9 @@ is the built demo — open it directly, no server required.
 ```bash
 npm install
 npm run build     # bundles the demo into index.html
-npm test          # typecheck + 34 tests
+npm test          # typecheck + 75 tests
 npm run serve     # build and serve on :8080
+npm run phone     # build, serve, and open a public HTTPS tunnel
 ```
 
 Open `index.html`, hit **Start transmit**, then **Use loopback**. Two things
@@ -55,8 +56,12 @@ Worth reaching for on long throws, under coloured ambient, on monochrome or
 e-ink panels, and for grids that will be screenshotted — JPEG 4:2:0 chroma
 subsampling wrecks the blue plane while luma survives.
 
-Camera capture is often blocked in a sandboxed frame; save the page and open
-it from disk if the camera button errors.
+Camera capture needs a secure context, and a plain `http://` LAN address is
+not one — `navigator.mediaDevices` is simply absent there, and on iOS a
+self-signed certificate does not help either. `npm run phone` builds, serves,
+and opens a Cloudflare quick tunnel with a publicly trusted certificate, then
+prints the URL to open on the phone. It needs `cloudflared` (`brew install
+cloudflared`).
 
 ## Layout
 
@@ -65,7 +70,7 @@ src/core/      protocol — codec, framing, sessions, manifest. No DOM.
 src/vision/    capture pipeline — markers, homography, colour decisions.
 src/receiver.ts  the two, wired together
 src/demo/      presentation only: canvas, UI, loopback simulator
-test/          34 tests, including a full optical loop with no browser
+test/          75 tests, including a full optical loop with no browser
 ```
 
 The split is load-bearing: `core` and `vision` never touch the DOM, so the

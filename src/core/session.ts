@@ -22,6 +22,9 @@ import { parseManifest, type Manifest } from "./manifest.ts";
 
 /** Sessions kept warm for cross-cycle accumulation. */
 export const DEFAULT_SESSION_CACHE = 4;
+/** Ceiling on the cache a SET record may ask for. Matches the 8-bit short id
+ *  space, which already bounds how many objects a set can hold. */
+export const MAX_SESSION_CACHE = 256;
 /** Symbols held per unbound sid8 while waiting for a manifest. */
 const PENDING_PER_SHORT_ID = 256;
 /** Distinct unbound sid8 values tracked at once. */
@@ -97,7 +100,7 @@ export class SessionRouter {
   private readonly bindings = new Map<number, number>(); // sid8 -> sessionId
   private readonly pending = new Map<number, { esi: number; payload: Uint8Array }[]>();
   private active: number | null = null;
-  private readonly cacheSize: number;
+  private cacheSize: number;
 
   constructor(cacheSize: number = DEFAULT_SESSION_CACHE) {
     this.cacheSize = cacheSize;
@@ -146,6 +149,16 @@ export class SessionRouter {
     const id = manifest.sessionId;
     const switched = this.active !== id;
     let session = this.sessions.get(id);
+
+    // A set is transmitted round-robin, so every segment is partly decoded at
+    // once. Evicting one throws away work that will not come round again for
+    // a whole pass; the manifest says how many to expect, so hold them all.
+    if (manifest.set) {
+      this.cacheSize = Math.max(
+        this.cacheSize,
+        Math.min(manifest.set.objCount, MAX_SESSION_CACHE),
+      );
+    }
 
     if (session) {
       this.touch(id);
