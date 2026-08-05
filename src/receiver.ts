@@ -8,7 +8,7 @@ import type { Geometry } from "./core/geometry.ts";
 import { SessionRouter, type Session } from "./core/session.ts";
 import { FrameDecoder } from "./vision/decode.ts";
 import { toGrayscale, type RgbaImage } from "./vision/image.ts";
-import { findMarkerBlobs, orderCorners } from "./vision/markers.ts";
+import { expectedMarkerRatio, findMarkerBlobs, findMarkerQuads } from "./vision/markers.ts";
 import { otsu } from "./vision/threshold.ts";
 import type { Homography } from "./vision/homography.ts";
 
@@ -54,11 +54,15 @@ export class Receiver {
   private readonly decoder: FrameDecoder;
   private readonly finished = new Set<number>();
   private readonly geometry: Geometry;
+  /** Quads to try per frame. Geometry alone cannot tell the code from a dark
+   *  speck on a bright surface; only a passing CRC can. */
+  private readonly candidates: number;
 
-  constructor(geometry: Geometry, router = new SessionRouter()) {
+  constructor(geometry: Geometry, router = new SessionRouter(), candidates = 4) {
     this.geometry = geometry;
     this.decoder = new FrameDecoder(geometry);
     this.router = router;
+    this.candidates = Math.max(1, candidates);
   }
 
   get activeSession(): Session | null {
@@ -70,10 +74,15 @@ export class Receiver {
 
     const gray = toGrayscale(img);
     const blobs = findMarkerBlobs(gray, img.width, img.height, otsu(gray));
-    const corners = orderCorners(blobs);
-    if (!corners) return miss();
 
-    const readout = this.decoder.decode(img, corners);
+    let readout = null;
+    const ratio = expectedMarkerRatio(this.geometry.W);
+    for (const corners of findMarkerQuads(blobs, this.candidates, ratio)) {
+      const attempt = this.decoder.decode(img, corners);
+      if (!attempt) continue;
+      if (!readout || attempt.bandsPassed > readout.bandsPassed) readout = attempt;
+      if (readout.bandsPassed > 0) break;
+    }
     if (!readout) return miss();
 
     this.stats.framesLocked++;

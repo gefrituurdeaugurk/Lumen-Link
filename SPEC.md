@@ -98,7 +98,7 @@ When the enhancement layer is dropped, the blue plane across the band region
 **MUST** mirror the luma plane, placing every band cell on palette index 0 or
 3. Forcing the plane to a constant instead leaves a mid-luma colour on the
 grid — blue at index 2, or yellow at index 1 — and keeps the narrow luma
-margin the mode exists to widen. Against the §8.3 threshold, measured on the
+margin the mode exists to widen. Against the §8.4 threshold, measured on the
 palette above:
 
 | mode | band-region colours | worst-case luma margin |
@@ -114,7 +114,7 @@ mode and no receiver change is needed.
 The cost is one symbol per frame out of five, not half the rate — the blue
 plane carries a single symbol at 2×2 pitch against four luma bands. In
 conditions bad enough to want this mode the receiver is already discarding
-that symbol under the §8.3 floor, so the throughput cost approaches zero
+that symbol under the §8.4 floor, so the throughput cost approaches zero
 exactly where the margin is worth the most.
 
 ---
@@ -225,7 +225,7 @@ no two objects in a loop share a `sid8`. This removes the ambiguity
 entirely, at zero runtime cost.
 
 When a collision does occur, a receiver **MUST** treat the previously bound
-session as contaminated and discard it (§8.4). Between a switch and the new
+session as contaminated and discard it (§8.5). Between a switch and the new
 object's first manifest, the new object's symbols carry the old binding and
 are routed into the old decoder; nothing downstream catches that, because
 those symbols pass their band CRC honestly. Only the whole-file CRC would,
@@ -335,14 +335,41 @@ box expanded by a small fixed pad and require ≥75% bright.
 Without that ring test, an isolated dark cell in the band region is
 indistinguishable from a marker on shape and area alone.
 
-### 8.2 Orientation
+### 8.2 Corner selection
+
+Surviving blobs are candidates, not corners. A capture of a screen in a room
+contains many dark shapes on bright surfaces — text on paper, keys on a
+keyboard, a socket on a wall — and each passes every test in §8.1. Choosing
+corners by frame extremes therefore gives any one of them a veto: two such
+shapes are enough to halve the lock rate, and a handful reduces it to noise.
+
+A receiver **MUST** instead select four blobs that are consistent with the
+marker layout, and **SHOULD** rank several candidates and try each until one
+reads. The tests, all scale-free so they hold at any distance:
+
+- convex, in TL, TR, BR, BL order;
+- side lengths within a bounded ratio of each other, and likewise the two
+  diagonals, so perspective is allowed but slivers are not;
+- quad area bounded below against the square of the mean side;
+- corner blob areas within a bounded ratio of each other (§2.3 makes one
+  marker 4×4 against three 6×6, a factor of 2.25 before perspective);
+- **mean marker side over the distance between marker centres**, which the
+  format fixes at `sqrt(31) / (W − 8)` — about 0.14 at 48×48 and 0.10 at
+  64×64. This is the sharpest single test available, because it is
+  independent of distance, rotation and scale.
+
+Geometry alone can never be conclusive. The CRC downstream is the only
+authority on whether a quad was the code, which is why candidates are ranked
+rather than chosen.
+
+### 8.3 Orientation
 
 Estimate rotation from marker areas (§2.3), try that first, then fall back
 to the remaining rotations. A candidate is accepted when at least one band
 passes CRC **and** that band's header `band` field matches the region it was
 read from. Receivers **SHOULD** cache the last accepted rotation.
 
-### 8.3 Colour decisions
+### 8.4 Colour decisions
 
 Luma: one threshold, midway between the mean of the dark calibration pair
 (black, blue) and the bright pair (yellow, white).
@@ -362,7 +389,7 @@ average. Below a floor (16 levels in the reference implementation) the
 enhancement layer **SHOULD** be skipped entirely rather than fed noise into
 the decoder — the base layer keeps converging on its own.
 
-### 8.4 Session routing
+### 8.5 Session routing
 
 ```
 MANIFEST  → validate (§5.3); create or resume the session; bind sid8;
@@ -381,7 +408,7 @@ Buffering rules:
 Receivers **SHOULD** keep several sessions warm (4 in the reference
 implementation, LRU) so loop accumulation works across a playlist cycle.
 
-### 8.5 Completion
+### 8.6 Completion
 
 Completion is `K` recovered blocks **and** a matching `fileCRC`. A receiver
 **MUST** verify the whole-file CRC before presenting a payload as complete —

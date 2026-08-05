@@ -103,8 +103,17 @@ Also in this version:
   entropy, and doubles as a cross-check on geometry.
 - **Marker detection** now requires a bright quiet ring, without which an
   isolated dark cell in the band region is indistinguishable from a marker.
+- **Corners are ranked, not taken from the frame extremes.** A room is full
+  of dark shapes on bright surfaces that pass every marker shape test, and
+  picking corners by extremes gives each of them a veto. Candidate quads are
+  now scored against the marker-to-span ratio the format fixes — about 0.14
+  at 48×48, independent of distance and rotation — and the best few are tried
+  until a band reads. On a simulated capture of a screen in a cluttered room,
+  lock went from 13% to 100%.
 - **Bounded sizes.** `K ≤ 8192` keeps at least 8× fountain overhead against
-  the 16-bit ESI space; larger payloads segment across sessions.
+  the 16-bit ESI space; larger payloads segment across sessions via `SET`,
+  each segment its own session, reassembled by `objIndex` and checked against
+  a whole-payload CRC.
 
 ## Encrypted payloads (optional)
 

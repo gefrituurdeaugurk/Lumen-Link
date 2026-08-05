@@ -187,6 +187,7 @@ button:focus-visible,select:focus-visible,input:focus-visible{outline:3px solid 
     </div>
 
     <div class="stage"><canvas id="txCanvas" width="512" height="512"></canvas></div>
+    <div class="err" id="txErr"></div>
 
     <div class="readout">
       <div class="cellv"><span class="k">File</span><span class="v" id="txFile" style="font-size:12px">demo text</span></div>
@@ -805,6 +806,19 @@ Drag <b>Green ambient</b> up in loopback: separation on the scope drops, the blu
     return crc32(buf);
   }
   var shortId = (sessionId) => sessionId & 255;
+  function assignNonces(objects) {
+    const used = /* @__PURE__ */ new Set();
+    return objects.map((o) => {
+      for (let nonce = 0; nonce < 4096; nonce++) {
+        const s = shortId(deriveSessionId(o.fileCRC, o.total, o.name, nonce));
+        if (!used.has(s)) {
+          used.add(s);
+          return nonce;
+        }
+      }
+      throw new Error("could not find a collision-free nonce; playlist too large for 8-bit ids");
+    });
+  }
   var SessionRouter = class {
     sessions = /* @__PURE__ */ new Map();
     bindings = /* @__PURE__ */ new Map();
@@ -1099,6 +1113,118 @@ Drag <b>Green ambient</b> up in loopback: separation on the scope drops, the blu
       this.frameIndex++;
       if (this.closingIn !== null && this.closingIn > 0) this.closingIn--;
       return { grid, stats };
+    }
+  };
+
+  // src/core/set.ts
+  var DEFAULT_FRAMES_PER_SEGMENT = 120;
+  var MAX_SEGMENTS = 256;
+  function segmentCapacity(grid) {
+    return geometry(grid).symBytes * MAX_K;
+  }
+  function segmentPayload(payload2, segmentBytes) {
+    if (segmentBytes <= 0) throw new RangeError("segmentBytes must be positive");
+    if (payload2.length <= segmentBytes) return [payload2];
+    const out = [];
+    for (let off = 0; off < payload2.length; off += segmentBytes) {
+      out.push(payload2.subarray(off, Math.min(payload2.length, off + segmentBytes)));
+    }
+    return out;
+  }
+  var SetTransmitter = class {
+    /** CRC of the whole payload. Doubles as the set id, so a receiver can
+     *  verify the reassembled file without a field the format does not have. */
+    setId;
+    segments;
+    framesPerSegment;
+    total;
+    index = 0;
+    framesOnSegment = 0;
+    constructor(payload2, opts) {
+      this.setId = crc32(payload2);
+      this.total = payload2.length;
+      this.framesPerSegment = opts.framesPerSegment ?? DEFAULT_FRAMES_PER_SEGMENT;
+      const ceiling = segmentCapacity(opts.grid);
+      const parts = segmentPayload(payload2, Math.min(opts.segmentBytes ?? ceiling, ceiling));
+      if (parts.length > MAX_SEGMENTS) {
+        throw new RangeError(
+          `payload needs ${parts.length} segments at ${opts.grid}x${opts.grid}, over the ${MAX_SEGMENTS} ceiling \u2014 use a larger grid or a smaller payload`
+        );
+      }
+      const idName = opts.encryption ? "" : opts.name ?? "payload.bin";
+      const nonces = assignNonces(
+        parts.map((part) => ({ fileCRC: crc32(part), total: part.length, name: idName }))
+      );
+      this.segments = parts.map(
+        (part, i) => new Transmitter(part, {
+          grid: opts.grid,
+          nonce: nonces[i],
+          ...opts.name !== void 0 ? { name: opts.name } : {},
+          ...opts.enhancement !== void 0 ? { enhancement: opts.enhancement } : {},
+          ...opts.contentType !== void 0 ? { contentType: opts.contentType } : {},
+          ...opts.encryption !== void 0 ? { encryption: opts.encryption } : {},
+          // A lone object is just a session; the SET record would only cost
+          // manifest bytes that a small grid cannot spare.
+          ...parts.length > 1 ? { set: { setId: this.setId, objIndex: i, objCount: parts.length } } : {}
+        })
+      );
+    }
+    get objIndex() {
+      return this.index;
+    }
+    get objCount() {
+      return this.segments.length;
+    }
+    get current() {
+      return this.segments[this.index];
+    }
+    get geometry() {
+      return this.current.geometry;
+    }
+    get sessionId() {
+      return this.current.sessionId;
+    }
+    get encoder() {
+      return this.current.encoder;
+    }
+    next() {
+      const frame = this.current.next();
+      if (++this.framesOnSegment >= this.framesPerSegment) {
+        this.framesOnSegment = 0;
+        this.index = (this.index + 1) % this.segments.length;
+      }
+      return frame;
+    }
+  };
+  var SetAssembler = class {
+    sets = /* @__PURE__ */ new Map();
+    /** Returns null for a session that is not part of a multi-object set. */
+    add(manifest, bytes) {
+      const set = manifest.set;
+      if (!set || set.objCount <= 1) return null;
+      let entry = this.sets.get(set.setId);
+      if (!entry) {
+        entry = { name: manifest.name, count: set.objCount, parts: /* @__PURE__ */ new Map() };
+        this.sets.set(set.setId, entry);
+      }
+      entry.parts.set(set.objIndex, bytes);
+      const base = {
+        setId: set.setId,
+        name: entry.name,
+        received: entry.parts.size,
+        count: entry.count
+      };
+      if (entry.parts.size < entry.count) return { ...base, bytes: null, verified: false };
+      let length = 0;
+      for (let i = 0; i < entry.count; i++) length += entry.parts.get(i).length;
+      const joined = new Uint8Array(length);
+      let off = 0;
+      for (let i = 0; i < entry.count; i++) {
+        const part = entry.parts.get(i);
+        joined.set(part, off);
+        off += part.length;
+      }
+      return { ...base, bytes: joined, verified: crc32(joined) === set.setId };
     }
   };
 
@@ -1426,22 +1552,92 @@ Drag <b>Green ambient</b> up in loopback: separation on the scope drops, the blu
     }
     return out;
   }
-  function orderCorners(blobs) {
-    if (blobs.length < 4) return null;
-    let tl = 0;
-    let br = 0;
-    let tr = 0;
-    let bl = 0;
-    for (let i = 1; i < blobs.length; i++) {
-      const b = blobs[i];
-      if (b.x + b.y < blobs[tl].x + blobs[tl].y) tl = i;
-      if (b.x + b.y > blobs[br].x + blobs[br].y) br = i;
-      if (b.x - b.y > blobs[tr].x - blobs[tr].y) tr = i;
-      if (b.x - b.y < blobs[bl].x - blobs[bl].y) bl = i;
+  var MAX_SIDE_RATIO = 2.6;
+  var MAX_DIAGONAL_RATIO = 1.9;
+  var MIN_SIDE_PX = 12;
+  var MIN_SQUARENESS = 0.4;
+  var AREA_SPREAD = 4.5;
+  var MIN_MARKER_RATIO = 0.035;
+  var MAX_MARKER_RATIO = 0.45;
+  var MAX_RATIO_DRIFT = Math.LN2;
+  var MAX_WINDOW = 22;
+  var MAX_BLOBS = 18;
+  var dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+  function expectedMarkerRatio(W) {
+    return Math.sqrt((36 + 36 + 36 + 16) / 4) / (W - 8);
+  }
+  function orderQuad(quad) {
+    const cx = (quad[0].x + quad[1].x + quad[2].x + quad[3].x) / 4;
+    const cy = (quad[0].y + quad[1].y + quad[2].y + quad[3].y) / 4;
+    const ring = [...quad].sort(
+      (a, b) => Math.atan2(a.y - cy, a.x - cx) - Math.atan2(b.y - cy, b.x - cx)
+    );
+    for (let i = 0; i < 4; i++) {
+      const a = ring[i];
+      const b = ring[(i + 1) % 4];
+      const c = ring[(i + 2) % 4];
+      const cross = (b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x);
+      if (cross <= 0) return null;
     }
-    const idx = [tl, tr, br, bl];
-    if (new Set(idx).size < 4) return null;
-    return idx.map((i) => blobs[i]);
+    let start = 0;
+    for (let i = 1; i < 4; i++) {
+      if (ring[i].x + ring[i].y < ring[start].x + ring[start].y) start = i;
+    }
+    return [0, 1, 2, 3].map((i) => ring[(start + i) % 4]);
+  }
+  function scoreQuad(p, expected) {
+    const sides = [dist(p[0], p[1]), dist(p[1], p[2]), dist(p[2], p[3]), dist(p[3], p[0])];
+    const minSide = Math.min(...sides);
+    const maxSide = Math.max(...sides);
+    if (minSide < MIN_SIDE_PX) return null;
+    if (maxSide / minSide > MAX_SIDE_RATIO) return null;
+    const d0 = dist(p[0], p[2]);
+    const d1 = dist(p[1], p[3]);
+    if (Math.max(d0, d1) / Math.min(d0, d1) > MAX_DIAGONAL_RATIO) return null;
+    let area = 0;
+    for (let i = 0; i < 4; i++) {
+      const a = p[i];
+      const b = p[(i + 1) % 4];
+      area += a.x * b.y - b.x * a.y;
+    }
+    area = Math.abs(area) / 2;
+    const meanSide = (sides[0] + sides[1] + sides[2] + sides[3]) / 4;
+    if (area < MIN_SQUARENESS * meanSide * meanSide) return null;
+    const areas = p.map((b) => b.area);
+    if (Math.max(...areas) / Math.min(...areas) > AREA_SPREAD) return null;
+    const markerSide = Math.sqrt(areas.reduce((s, a) => s + a, 0) / 4);
+    const ratio = markerSide / meanSide;
+    if (ratio < MIN_MARKER_RATIO || ratio > MAX_MARKER_RATIO) return null;
+    const skew = maxSide / minSide * (Math.max(d0, d1) / Math.min(d0, d1));
+    if (expected === void 0) {
+      return area / skew;
+    }
+    const drift = Math.abs(Math.log(ratio / expected));
+    if (drift > MAX_RATIO_DRIFT) return null;
+    return 1 / ((1 + drift) * skew);
+  }
+  function findMarkerQuads(blobs, limit = 4, expected) {
+    if (blobs.length < 4) return [];
+    const kept = blobs.length <= MAX_BLOBS ? [...blobs] : [...blobs].sort((a, b) => b.area - a.area).slice(0, MAX_BLOBS);
+    const sorted = kept.sort((a, b) => a.area - b.area);
+    const found = [];
+    for (let i = 0; i < sorted.length - 3; i++) {
+      let end = i + 1;
+      while (end < sorted.length && sorted[end].area <= sorted[i].area * AREA_SPREAD) end++;
+      end = Math.min(end, i + 1 + MAX_WINDOW);
+      for (let a = i + 1; a < end - 2; a++) {
+        for (let b = a + 1; b < end - 1; b++) {
+          for (let c = b + 1; c < end; c++) {
+            const quad = orderQuad([sorted[i], sorted[a], sorted[b], sorted[c]]);
+            if (!quad) continue;
+            const score = scoreQuad(quad, expected);
+            if (score !== null) found.push({ quad, score });
+          }
+        }
+      }
+    }
+    found.sort((x, y) => y.score - x.score);
+    return found.slice(0, limit).map((f) => f.quad);
   }
 
   // src/vision/threshold.ts
@@ -1488,10 +1684,14 @@ Drag <b>Green ambient</b> up in loopback: separation on the scope drops, the blu
     decoder;
     finished = /* @__PURE__ */ new Set();
     geometry;
-    constructor(geometry2, router = new SessionRouter()) {
+    /** Quads to try per frame. Geometry alone cannot tell the code from a dark
+     *  speck on a bright surface; only a passing CRC can. */
+    candidates;
+    constructor(geometry2, router = new SessionRouter(), candidates = 4) {
       this.geometry = geometry2;
       this.decoder = new FrameDecoder(geometry2);
       this.router = router;
+      this.candidates = Math.max(1, candidates);
     }
     get activeSession() {
       return this.router.activeSession;
@@ -1500,9 +1700,14 @@ Drag <b>Green ambient</b> up in loopback: separation on the scope drops, the blu
       this.stats.framesSeen++;
       const gray = toGrayscale(img);
       const blobs = findMarkerBlobs(gray, img.width, img.height, otsu(gray));
-      const corners = orderCorners(blobs);
-      if (!corners) return miss();
-      const readout = this.decoder.decode(img, corners);
+      let readout = null;
+      const ratio = expectedMarkerRatio(this.geometry.W);
+      for (const corners of findMarkerQuads(blobs, this.candidates, ratio)) {
+        const attempt = this.decoder.decode(img, corners);
+        if (!attempt) continue;
+        if (!readout || attempt.bandsPassed > readout.bandsPassed) readout = attempt;
+        if (readout.bandsPassed > 0) break;
+      }
       if (!readout) return miss();
       this.stats.framesLocked++;
       this.stats.bandsTried += readout.bandsTried;
@@ -1926,6 +2131,7 @@ Drag <b>Green ambient</b> up in loopback: separation on the scope drops, the blu
   var txTimer = null;
   var txFrames = 0;
   var txBytes = 0;
+  var txSegment = 0;
   var txStart = 0;
   var payload = new TextEncoder().encode(DEMO_PAYLOADS[0].text);
   var payloadName = DEMO_PAYLOADS[0].name;
@@ -1935,34 +2141,56 @@ Drag <b>Green ambient</b> up in loopback: separation on the scope drops, the blu
   var DEMO_KEY_ID = 1097950;
   var encryptionOn = () => $("encSel").value === "1";
   var receiverHasKey = () => $("keySel").value === "1";
+  function showTxError(message) {
+    const el = $("txErr");
+    el.textContent = message ?? "";
+    el.style.display = message ? "block" : "none";
+  }
+  function describeSize(bytes) {
+    return bytes >= 1024 * 1024 ? `${(bytes / (1024 * 1024)).toFixed(1)} MB` : `${Math.round(bytes / 1024)} KB`;
+  }
   async function buildTransmitter() {
     const grid = Number($("gridSel").value);
     const enhancement = $("chromaSel").value === "1";
-    if (encryptionOn()) {
-      const sealed = await sealPayload(payload, { name: payloadName }, DEMO_KEY, DEMO_KEY_ID);
-      tx = new Transmitter(sealed, {
-        grid,
-        enhancement,
-        encryption: { suite: CryptoSuite.A256SIV_HS256, keyId: DEMO_KEY_ID }
-      });
-    } else {
-      tx = new Transmitter(payload, { grid, enhancement, name: payloadName });
+    try {
+      if (encryptionOn()) {
+        const sealed = await sealPayload(payload, { name: payloadName }, DEMO_KEY, DEMO_KEY_ID);
+        tx = new SetTransmitter(sealed, {
+          grid,
+          enhancement,
+          encryption: { suite: CryptoSuite.A256SIV_HS256, keyId: DEMO_KEY_ID }
+        });
+      } else {
+        tx = new SetTransmitter(payload, { grid, enhancement, name: payloadName });
+      }
+    } catch (e) {
+      showTxError(e instanceof Error ? e.message : String(e));
+      return false;
     }
+    showTxError(null);
     renderer.resize(grid);
-    $("txFile").textContent = encryptionOn() ? `\u{1F512} ${payloadName}` : payloadName;
+    const label = encryptionOn() ? `\u{1F512} ${payloadName}` : payloadName;
+    $("txFile").textContent = tx.objCount > 1 ? `${label}  \xB7  ${describeSize(tx.total)} in ${tx.objCount} segments` : label;
     $("txSession").textContent = tx.sessionId.toString(16).padStart(8, "0");
     $("txK").textContent = String(tx.encoder.K);
     $("txSym").innerHTML = `${tx.geometry.symBytes}<small> B</small>`;
     txFrames = 0;
     txBytes = 0;
+    txSegment = tx.objIndex;
     txStart = performance.now();
     rebuildReceiver(grid);
     drawFrame();
+    return true;
   }
   function drawFrame() {
     if (!tx) return;
     const { grid, stats } = tx.next();
     renderer.draw(grid);
+    if (tx.objIndex !== txSegment) {
+      txSegment = tx.objIndex;
+      $("txSession").textContent = tx.sessionId.toString(16).padStart(8, "0");
+      $("txK").textContent = String(tx.encoder.K);
+    }
     txFrames++;
     txBytes += stats.symbols * tx.geometry.symBytes;
     const elapsed = (performance.now() - txStart) / 1e3;
@@ -1998,16 +2226,30 @@ Drag <b>Green ambient</b> up in loopback: separation on the scope drops, the blu
     void buildTransmitter();
   };
   $("fileIn").onchange = (e) => {
-    const file = e.target.files?.[0];
+    const input = e.target;
+    const file = input.files?.[0];
     if (!file) return;
-    void file.arrayBuffer().then((buf) => {
+    void file.arrayBuffer().then(async (buf) => {
+      const prevPayload = payload;
+      const prevName = payloadName;
       payload = new Uint8Array(buf);
       payloadName = file.name;
-      return buildTransmitter();
+      if (!await buildTransmitter()) {
+        payload = prevPayload;
+        payloadName = prevName;
+        input.value = "";
+      }
     });
   };
   for (const id of ["gridSel", "chromaSel", "encSel"]) {
-    $(id).onchange = () => void buildTransmitter();
+    const select = $(id);
+    let lastGood = select.value;
+    select.onchange = () => {
+      void buildTransmitter().then((ok) => {
+        if (ok) lastGood = select.value;
+        else select.value = lastGood;
+      });
+    };
   }
   $("fpsSel").onchange = () => {
     if (txTimer !== null) setTransmitting(true);
@@ -2025,9 +2267,11 @@ Drag <b>Green ambient</b> up in loopback: separation on the scope drops, the blu
   var stream = null;
   var rxStart = 0;
   var history = [];
+  var assembler = new SetAssembler();
   function rebuildReceiver(grid) {
     rx = new Receiver(geometry(grid));
     history = [];
+    assembler = new SetAssembler();
     rxStart = performance.now();
     $("doneBox").style.display = "none";
     $("pFill").style.width = "0%";
@@ -2104,9 +2348,10 @@ Drag <b>Green ambient</b> up in loopback: separation on the scope drops, the blu
     const session = rx.activeSession;
     if (session) {
       const pct = 100 * session.decoder.have / session.decoder.K;
+      const set = session.manifest.set;
       $("pFill").style.width = `${pct.toFixed(1)}%`;
       $("pFill").className = "fill" + (s.chromaPassed > 0 ? " blue" : "");
-      $("pTxt").textContent = `${session.manifest.name}  \xB7  ${session.decoder.have} / ${session.decoder.K} blocks` + (session.closingIn !== null ? `  \xB7  closing in ${session.closingIn}` : "");
+      $("pTxt").textContent = `${session.manifest.name}  \xB7  ` + (set ? `segment ${set.objIndex + 1} / ${set.objCount}  \xB7  ` : "") + `${session.decoder.have} / ${session.decoder.K} blocks` + (session.closingIn !== null ? `  \xB7  closing in ${session.closingIn}` : "");
       $("pPct").textContent = `${pct.toFixed(0)}%`;
     }
     drawScope(scope, history);
@@ -2123,6 +2368,26 @@ Drag <b>Green ambient</b> up in loopback: separation on the scope drops, the blu
       $("doneName").textContent = `\u2717 checksum mismatch: ${session.manifest.name}  \xB7  ${stamp}`;
       return;
     }
+    const progress = assembler.add(session.manifest, bytes);
+    if (progress) {
+      if (!progress.bytes) {
+        box.classList.remove("sealed");
+        $("doneName").textContent = `\u22EF ${progress.name}  \xB7  ${progress.received} / ${progress.count} segments  \xB7  ${elapsed} s`;
+        return;
+      }
+      if (!progress.verified) {
+        box.classList.add("sealed");
+        $("doneName").textContent = `\u2717 set checksum mismatch: ${progress.name}`;
+        return;
+      }
+      const whole = `${progress.bytes.length} bytes  \xB7  ${progress.count} segments  \xB7  ${elapsed} s`;
+      deliver(progress.bytes, session, whole);
+      return;
+    }
+    deliver(bytes, session, stamp);
+  }
+  function deliver(bytes, session, stamp) {
+    const box = $("doneBox");
     const encryption = session.manifest.encryption;
     if (!encryption) {
       box.classList.remove("sealed");

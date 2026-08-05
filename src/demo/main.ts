@@ -5,7 +5,7 @@
  */
 
 import { geometry } from "../core/geometry.ts";
-import { Transmitter } from "../core/transmitter.ts";
+import { SetAssembler, SetTransmitter, segmentCapacity } from "../core/set.ts";
 import { Receiver } from "../receiver.ts";
 import { CHROMA_FLOOR } from "../vision/decode.ts";
 import { CryptoSuite, generateKey, isSupportedSuite } from "../core/crypto.ts";
@@ -40,10 +40,11 @@ const DEMO_PAYLOADS: readonly { name: string; text: string }[] = [
 const txCanvas = $<HTMLCanvasElement>("txCanvas");
 const renderer = new GridRenderer(txCanvas);
 
-let tx: Transmitter | null = null;
+let tx: SetTransmitter | null = null;
 let txTimer: number | null = null;
 let txFrames = 0;
 let txBytes = 0;
+let txSegment = 0;
 let txStart = 0;
 let payload = new TextEncoder().encode(DEMO_PAYLOADS[0].text);
 let payloadName = DEMO_PAYLOADS[0].name;
@@ -58,40 +59,76 @@ const DEMO_KEY_ID = 0x10c0de;
 const encryptionOn = () => $<HTMLSelectElement>("encSel").value === "1";
 const receiverHasKey = () => $<HTMLSelectElement>("keySel").value === "1";
 
-async function buildTransmitter(): Promise<void> {
+function showTxError(message: string | null): void {
+  const el = $("txErr");
+  el.textContent = message ?? "";
+  el.style.display = message ? "block" : "none";
+}
+
+/** Largest payload one session can carry. Anything past this segments across
+ *  sessions rather than being refused (SPEC.md §5.4). */
+function describeSize(bytes: number): string {
+  return bytes >= 1024 * 1024
+    ? `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+    : `${Math.round(bytes / 1024)} KB`;
+}
+
+/** Returns false and leaves the previous transmitter running if the payload
+ *  cannot be built, so a rejected file cannot leave the UI describing an
+ *  object that is not on the wire. */
+async function buildTransmitter(): Promise<boolean> {
   const grid = Number($<HTMLSelectElement>("gridSel").value);
   const enhancement = $<HTMLSelectElement>("chromaSel").value === "1";
 
-  if (encryptionOn()) {
-    // Seal before the fountain sees it. Name and content type ride inside the
-    // envelope, so the public manifest gives them away to nobody.
-    const sealed = await sealPayload(payload, { name: payloadName }, DEMO_KEY, DEMO_KEY_ID);
-    tx = new Transmitter(sealed, {
-      grid,
-      enhancement,
-      encryption: { suite: CryptoSuite.A256SIV_HS256, keyId: DEMO_KEY_ID },
-    });
-  } else {
-    tx = new Transmitter(payload, { grid, enhancement, name: payloadName });
+  try {
+    if (encryptionOn()) {
+      // Seal before the fountain sees it. Name and content type ride inside the
+      // envelope, so the public manifest gives them away to nobody.
+      const sealed = await sealPayload(payload, { name: payloadName }, DEMO_KEY, DEMO_KEY_ID);
+      tx = new SetTransmitter(sealed, {
+        grid,
+        enhancement,
+        encryption: { suite: CryptoSuite.A256SIV_HS256, keyId: DEMO_KEY_ID },
+      });
+    } else {
+      tx = new SetTransmitter(payload, { grid, enhancement, name: payloadName });
+    }
+  } catch (e) {
+    showTxError(e instanceof Error ? e.message : String(e));
+    return false;
   }
 
+  showTxError(null);
   renderer.resize(grid);
-  $("txFile").textContent = encryptionOn() ? `🔒 ${payloadName}` : payloadName;
+  const label = encryptionOn() ? `🔒 ${payloadName}` : payloadName;
+  $("txFile").textContent =
+    tx.objCount > 1
+      ? `${label}  ·  ${describeSize(tx.total)} in ${tx.objCount} segments`
+      : label;
   $("txSession").textContent = tx.sessionId.toString(16).padStart(8, "0");
   $("txK").textContent = String(tx.encoder.K);
   $("txSym").innerHTML = `${tx.geometry.symBytes}<small> B</small>`;
 
   txFrames = 0;
   txBytes = 0;
+  txSegment = tx.objIndex;
   txStart = performance.now();
   rebuildReceiver(grid);
   drawFrame();
+  return true;
 }
 
 function drawFrame(): void {
   if (!tx) return;
   const { grid, stats } = tx.next();
   renderer.draw(grid);
+
+  // The set rotates between segments, and each one is its own session.
+  if (tx.objIndex !== txSegment) {
+    txSegment = tx.objIndex;
+    $("txSession").textContent = tx.sessionId.toString(16).padStart(8, "0");
+    $("txK").textContent = String(tx.encoder.K);
+  }
 
   txFrames++;
   txBytes += stats.symbols * tx.geometry.symBytes;
@@ -132,17 +169,34 @@ $("swapBtn").onclick = () => {
 };
 
 $<HTMLInputElement>("fileIn").onchange = (e) => {
-  const file = (e.target as HTMLInputElement).files?.[0];
+  const input = e.target as HTMLInputElement;
+  const file = input.files?.[0];
   if (!file) return;
-  void file.arrayBuffer().then((buf) => {
+  void file.arrayBuffer().then(async (buf) => {
+    const prevPayload = payload;
+    const prevName = payloadName;
     payload = new Uint8Array(buf);
     payloadName = file.name;
-    return buildTransmitter();
+
+    if (!(await buildTransmitter())) {
+      payload = prevPayload;
+      payloadName = prevName;
+      input.value = "";
+    }
   });
 };
 
 for (const id of ["gridSel", "chromaSel", "encSel"]) {
-  $<HTMLSelectElement>(id).onchange = () => void buildTransmitter();
+  const select = $<HTMLSelectElement>(id);
+  let lastGood = select.value;
+  select.onchange = () => {
+    void buildTransmitter().then((ok) => {
+      if (ok) lastGood = select.value;
+      // A smaller grid may not fit the current payload; do not leave the
+      // control claiming a setting that was refused.
+      else select.value = lastGood;
+    });
+  };
 }
 $<HTMLSelectElement>("fpsSel").onchange = () => {
   if (txTimer !== null) setTransmitting(true);
@@ -165,10 +219,12 @@ let mode: "cam" | "loop" | null = null;
 let stream: MediaStream | null = null;
 let rxStart = 0;
 let history: ScopeEntry[] = [];
+let assembler = new SetAssembler();
 
 function rebuildReceiver(grid: number): void {
   rx = new Receiver(geometry(grid));
   history = [];
+  assembler = new SetAssembler();
   rxStart = performance.now();
   $("doneBox").style.display = "none";
   $("pFill").style.width = "0%";
@@ -275,10 +331,13 @@ function updateMeters(): void {
   const session = rx.activeSession;
   if (session) {
     const pct = (100 * session.decoder.have) / session.decoder.K;
+    const set = session.manifest.set;
     $("pFill").style.width = `${pct.toFixed(1)}%`;
     $("pFill").className = "fill" + (s.chromaPassed > 0 ? " blue" : "");
     $("pTxt").textContent =
-      `${session.manifest.name}  ·  ${session.decoder.have} / ${session.decoder.K} blocks` +
+      `${session.manifest.name}  ·  ` +
+      (set ? `segment ${set.objIndex + 1} / ${set.objCount}  ·  ` : "") +
+      `${session.decoder.have} / ${session.decoder.K} blocks` +
       (session.closingIn !== null ? `  ·  closing in ${session.closingIn}` : "");
     $("pPct").textContent = `${pct.toFixed(0)}%`;
   }
@@ -301,6 +360,31 @@ function present(session: Session): void {
     return;
   }
 
+  // A segment on its own is not a file. Hold it until the set is whole, then
+  // hand the joined bytes on exactly as a single-session object would be.
+  const progress = assembler.add(session.manifest, bytes);
+  if (progress) {
+    if (!progress.bytes) {
+      box.classList.remove("sealed");
+      $("doneName").textContent =
+        `⋯ ${progress.name}  ·  ${progress.received} / ${progress.count} segments  ·  ${elapsed} s`;
+      return;
+    }
+    if (!progress.verified) {
+      box.classList.add("sealed");
+      $("doneName").textContent = `✗ set checksum mismatch: ${progress.name}`;
+      return;
+    }
+    const whole = `${progress.bytes.length} bytes  ·  ${progress.count} segments  ·  ${elapsed} s`;
+    deliver(progress.bytes, session, whole);
+    return;
+  }
+
+  deliver(bytes, session, stamp);
+}
+
+function deliver(bytes: Uint8Array, session: Session, stamp: string): void {
+  const box = $("doneBox");
   const encryption = session.manifest.encryption;
   if (!encryption) {
     box.classList.remove("sealed");

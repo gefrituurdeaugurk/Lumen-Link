@@ -89,6 +89,16 @@ export {
 } from "./core/raster.ts";
 
 export {
+  DEFAULT_FRAMES_PER_SEGMENT,
+  SetAssembler,
+  SetTransmitter,
+  segmentCapacity,
+  segmentPayload,
+  type SetProgress,
+  type SetTransmitterOptions,
+} from "./core/set.ts";
+
+export {
   MANIFEST_INTERVAL,
   Transmitter,
   type FrameStats,
@@ -97,7 +107,13 @@ export {
 
 export { CHROMA_FLOOR, FrameDecoder, type FrameReadout } from "./vision/decode.ts";
 export { toGrayscale, type RgbaImage } from "./vision/image.ts";
-export { findMarkerBlobs, orderCorners, type Blob } from "./vision/markers.ts";
+export {
+  expectedMarkerRatio,
+  findMarkerBlobs,
+  findMarkerQuads,
+  orderCorners,
+  type Blob,
+} from "./vision/markers.ts";
 export { otsu } from "./vision/threshold.ts";
 export {
   applyHomography,
