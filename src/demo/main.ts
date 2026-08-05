@@ -370,6 +370,19 @@ function stopReceive(): void {
 $("camBtn").onclick = async () => {
   const err = $("rxErr");
   err.style.display = "none";
+
+  // getUserMedia is only exposed in a secure context, so a plain-http LAN
+  // address leaves mediaDevices undefined rather than raising a camera error.
+  if (!navigator.mediaDevices?.getUserMedia) {
+    err.textContent = window.isSecureContext
+      ? "This browser exposes no camera API. Use loopback to exercise the codec."
+      : `Camera needs a secure context — this page is on ${window.location.protocol}//. ` +
+        `Reopen it over https, or on localhost, or save it and open it from disk. ` +
+        `Loopback works here regardless.`;
+    err.style.display = "block";
+    return;
+  }
+
   try {
     stream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 960 } },
