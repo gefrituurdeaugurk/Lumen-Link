@@ -104,8 +104,11 @@ export function tearFrames(before: RgbaImage, after: RgbaImage, at: number): Rgb
 }
 
 export interface SceneOptions extends RenderOptions {
-  /** Frame width in pixels; height follows a 16:9 sensor. */
+  /** Frame width in pixels; height follows a 16:9 sensor unless given. */
   readonly frameWidth?: number;
+  /** Frame height in pixels. A phone held upright delivers a tall frame, and
+   *  the code then has only the short side to live on. */
+  readonly frameHeight?: number;
   /** Fraction of the frame width the screen occupies. */
   readonly fill?: number;
   /** Bezel and room brightness, 0..255. */
@@ -136,7 +139,7 @@ export interface SceneOptions extends RenderOptions {
  */
 export function renderScene(grid: CellGrid, opts: SceneOptions = {}): RgbaImage {
   const width = opts.frameWidth ?? 960;
-  const height = Math.round((width * 9) / 16);
+  const height = opts.frameHeight ?? Math.round((width * 9) / 16);
   const fill = opts.fill ?? 0.5;
   const room = opts.room ?? 38;
   const gradient = opts.gradient ?? 0.35;

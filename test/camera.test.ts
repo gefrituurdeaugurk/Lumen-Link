@@ -38,6 +38,29 @@ function lockRate(opts: SceneOptions & { grid?: number; frames?: number }): {
 
 const room: SceneOptions = { clutter: 6, gradient: 0.35, noise: 20 };
 
+test("each grid has a cell pitch below which it reads nothing", () => {
+  // A phone frames the code small, and pitch is the whole story once it does.
+  // Measured on a 1920x3413 portrait capture: 80 reads nothing at 3.7 px a
+  // cell and everything at 6.5, which is why only the densest grid dies first.
+  const tall = { ...room, frameWidth: 1920, frameHeight: 3413, blur: 1.5, frames: 6 };
+  assert.equal(lockRate({ ...tall, grid: 80, fill: 0.17 }).band, 0);
+  assert.ok(lockRate({ ...tall, grid: 80, fill: 0.3 }).band > 95);
+
+  // The sparser grid survives framing that kills the dense one, at a third of
+  // the payload per frame. That trade is the whole point of offering both.
+  assert.ok(lockRate({ ...tall, grid: 48, fill: 0.12 }).band > 95);
+});
+
+test("a portrait capture is croppable to a square without losing the code", () => {
+  // The demo hands the decoder a centred square crop, because a phone's
+  // 1920x3413 frame is 6.6 Mpx and 90 ms a frame against 30 ms at 1920x1080.
+  const opts = { ...room, grid: 64, fill: 0.45, blur: 1.5, frames: 6 };
+  const tall = lockRate({ ...opts, frameWidth: 1920, frameHeight: 3413 });
+  const square = lockRate({ ...opts, frameWidth: 1920, frameHeight: 1920 });
+  assert.ok(tall.band > 95, `tall ${tall.band.toFixed(0)}%`);
+  assert.ok(square.band > 95, `square ${square.band.toFixed(0)}%`);
+});
+
 test("a code on a screen in a room locks every frame", () => {
   const { lock, band } = lockRate(room);
   assert.equal(lock, 100);

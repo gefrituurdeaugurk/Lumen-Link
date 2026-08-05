@@ -77,7 +77,11 @@ button:focus-visible,select:focus-visible,input:focus-visible{outline:3px solid 
 /* ---- canvases ---- */
 .stage{background:var(--ink);display:flex;align-items:center;justify-content:center;position:relative;overflow:hidden}
 #txCanvas{display:block;image-rendering:pixelated;max-width:100%;height:auto}
+.stage:fullscreen{width:100vw;height:100vh}
+.stage:fullscreen #txCanvas{width:min(100vw,100vh);height:min(100vw,100vh);max-width:none}
 .viewport{position:relative;width:100%;aspect-ratio:4/3;background:var(--ink)}
+.viewport.cam{aspect-ratio:1}
+.viewport.cam video{object-fit:cover}
 .viewport video,.viewport canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}
 #rxOverlay{pointer-events:none}
 .hint{font-family:var(--mono);font-size:10.5px;color:var(--dim);margin-top:8px;line-height:1.5}
@@ -184,9 +188,13 @@ button:focus-visible,select:focus-visible,input:focus-visible{outline:3px solid 
         <label>&nbsp;</label>
         <button id="swapBtn" class="ghost">Swap payload</button>
       </div>
+      <div class="field" style="flex:0 0 auto">
+        <label>&nbsp;</label>
+        <button id="fullBtn" class="ghost">Present fullscreen</button>
+      </div>
     </div>
 
-    <div class="stage"><canvas id="txCanvas" width="512" height="512"></canvas></div>
+    <div class="stage" id="txStage"><canvas id="txCanvas" width="512" height="512"></canvas></div>
     <div class="err" id="txErr"></div>
 
     <div class="readout">
@@ -247,6 +255,12 @@ button:focus-visible,select:focus-visible,input:focus-visible{outline:3px solid 
       <div class="cellv"><span class="k">Chroma pass</span><span class="v" id="mChroma">–<small> %</small></span></div>
       <div class="cellv"><span class="k">Goodput</span><span class="v" id="mRate">–<small> B/s</small></span></div>
     </div>
+
+    <div class="readout">
+      <div class="cellv"><span class="k">Capture</span><span class="v" id="mCap">–</span></div>
+      <div class="cellv"><span class="k">Cell pitch</span><span class="v" id="mPitch">–<small> px</small></span></div>
+    </div>
+    <div class="err" id="pitchErr"></div>
 
     <div class="prog">
       <div class="bar"><div class="fill" id="pFill"></div>

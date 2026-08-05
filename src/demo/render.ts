@@ -14,8 +14,10 @@ export class GridRenderer {
     this.ctx = canvas.getContext("2d")!;
   }
 
-  /** Size the backing store so one cell is a whole number of pixels. */
-  resize(W: number, target = 512): void {
+  /** Size the backing store so one cell is a whole number of pixels. Sized for
+   *  the fullscreen present mode, since a camera needs every cell pixel it can
+   *  get; the inline preview just scales down. */
+  resize(W: number, target = 1024): void {
     this.cells.width = W;
     this.cells.height = W;
     const px = Math.max(4, Math.floor(target / W));

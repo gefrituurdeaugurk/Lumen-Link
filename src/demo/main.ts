@@ -8,6 +8,7 @@ import { geometry } from "../core/geometry.ts";
 import { SetAssembler, SetTransmitter, segmentCapacity } from "../core/set.ts";
 import { Receiver } from "../receiver.ts";
 import { CHROMA_FLOOR } from "../vision/decode.ts";
+import { applyHomography, type Homography } from "../vision/homography.ts";
 import { CryptoSuite, generateKey, isSupportedSuite } from "../core/crypto.ts";
 import { openPayload, sealPayload } from "../core/envelope.ts";
 import type { Session } from "../core/session.ts";
@@ -168,6 +169,11 @@ $("swapBtn").onclick = () => {
   void buildTransmitter();
 };
 
+$("fullBtn").onclick = () => {
+  if (document.fullscreenElement) void document.exitFullscreen();
+  else void $("txStage").requestFullscreen().catch(() => {});
+};
+
 $<HTMLInputElement>("fileIn").onchange = (e) => {
   const input = e.target as HTMLInputElement;
   const file = input.files?.[0];
@@ -212,6 +218,10 @@ const loopback = new LoopbackCamera(rxSim);
 
 const capture = document.createElement("canvas");
 const captureCtx = capture.getContext("2d", { willReadFrequently: true })!;
+
+/** Side of the square capture handed to the decoder. 1600 keeps grid 80 above
+ *  its pitch floor at sane framing and costs ~35 ms a frame to decode. */
+const CAPTURE_SIDE = 1600;
 
 let rx: Receiver | null = null;
 let rafId: number | null = null;
@@ -262,17 +272,25 @@ function tick(): void {
     sh = rxSim.height;
   }
 
-  // The loopback canvas is already small; a real camera is not. Cell pitch in
-  // the capture is what buys blur tolerance, and it is the binding constraint
-  // on the denser grids: measured on the scene fixture, 80x80 reads 46% of its
-  // bands from a 1280-wide capture and 100% from a 1920-wide one, against a
-  // blur scaled to match. Decoding costs ~30 ms a frame at 1920, well inside
-  // the budget at any frame rate a camera can actually follow.
-  const width = mode === "cam" ? Math.min(sw, 1920) : 480;
-  const height = Math.round((width * sh) / sw);
-  capture.width = width;
-  capture.height = height;
-  captureCtx.drawImage(source, 0, 0, width, height);
+  // The code is square and has to be aimed at, so a centred square crop of the
+  // sensor throws away nothing while keeping the short side's full pitch.
+  // Capping width alone let a phone's 1920x3413 portrait frame through whole:
+  // 6.6 Mpx and 90 ms a frame against 30 ms for the same code at 1920x1080.
+  let width: number;
+  let height: number;
+  if (mode === "cam") {
+    const src = Math.min(sw, sh);
+    width = height = Math.min(src, CAPTURE_SIDE);
+    capture.width = width;
+    capture.height = height;
+    captureCtx.drawImage(source, (sw - src) / 2, (sh - src) / 2, src, src, 0, 0, width, height);
+  } else {
+    width = 480;
+    height = Math.round((width * sh) / sw);
+    capture.width = width;
+    capture.height = height;
+    captureCtx.drawImage(source, 0, 0, width, height);
+  }
   const image = captureCtx.getImageData(0, 0, width, height);
 
   const outcome = rx.processFrame(image);
@@ -287,12 +305,36 @@ function tick(): void {
 
   drawLockOverlay(rxOverlay, outcome.homography, tx.geometry.W, width, height);
   rxOverlay.style.width = "100%";
+  reportPitch(outcome.homography, tx.geometry.W, width, height);
 
   if (outcome.switchedTo) {
     $("rxState").textContent = `new object: ${outcome.switchedTo.manifest.name}`;
   }
   if (outcome.completed) present(outcome.completed);
   if (rx.stats.framesSeen % 3 === 0) updateMeters();
+}
+
+/** Cell pitch below which bands start to fail, measured per grid on the scene
+ *  fixture: 48 still reads 100% at 4 px a cell, 64 needs 6, 80 needs 6.5. */
+function pitchFloor(W: number): number {
+  return W <= 48 ? 5 : W <= 64 ? 6.5 : 7;
+}
+
+function reportPitch(h: Homography | null, W: number, width: number, height: number): void {
+  $("mCap").textContent = `${width}×${height}`;
+  if (!h) return;
+
+  const [ax, ay] = applyHomography(h, 0, 0);
+  const [bx, by] = applyHomography(h, W, 0);
+  const pitch = Math.hypot(bx - ax, by - ay) / W;
+  $("mPitch").innerHTML = `${pitch.toFixed(1)}<small> px</small>`;
+
+  const el = $("pitchErr");
+  const tight = pitch < pitchFloor(W);
+  el.textContent = tight
+    ? `Only ${pitch.toFixed(1)} px per cell — present the code fullscreen, move closer, or drop to a smaller grid.`
+    : "";
+  el.style.display = tight ? "block" : "none";
 }
 
 function updateMeters(): void {
@@ -460,6 +502,7 @@ function startReceive(next: "cam" | "loop"): void {
   rebuildReceiver(Number($<HTMLSelectElement>("gridSel").value));
   rxVideo.style.display = next === "cam" ? "block" : "none";
   rxSim.style.display = next === "cam" ? "none" : "block";
+  rxVideo.parentElement!.classList.toggle("cam", next === "cam");
   $("simRow").style.display = next === "cam" ? "none" : "flex";
   $<HTMLButtonElement>("rxStop").disabled = false;
   $("rxState").textContent = next === "cam" ? "camera live" : "loopback";
@@ -497,7 +540,14 @@ $("camBtn").onclick = async () => {
 
   try {
     stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1080 } },
+      // Ask for everything the sensor will give: cell pitch in the capture is
+      // what decides whether a grid is readable, and in portrait the frame's
+      // short side is all the code gets. The capture is downscaled below.
+      video: {
+        facingMode: "environment",
+        width: { ideal: 3840 },
+        height: { ideal: 2160 },
+      },
     });
     rxVideo.srcObject = stream;
     await rxVideo.play();
