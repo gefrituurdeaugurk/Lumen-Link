@@ -155,8 +155,8 @@ button:focus-visible,select:focus-visible,input:focus-visible{outline:3px solid 
           <option value="5">5 fps</option>
           <option value="8">8 fps</option>
           <option value="12" selected>12 fps</option>
-          <option value="20">20 fps</option>
-          <option value="30">30 fps</option>
+          <option value="20">20 fps — tears on camera</option>
+          <option value="30">30 fps — loopback only</option>
         </select>
       </div>
       <div class="field">
@@ -2331,7 +2331,7 @@ Drag <b>Green ambient</b> up in loopback: separation on the scope drops, the blu
       sw = rxSim.width;
       sh = rxSim.height;
     }
-    const width = mode === "cam" ? Math.min(sw, 1280) : 480;
+    const width = mode === "cam" ? Math.min(sw, 1920) : 480;
     const height = Math.round(width * sh / sw);
     capture.width = width;
     capture.height = height;
@@ -2491,7 +2491,7 @@ Drag <b>Green ambient</b> up in loopback: separation on the scope drops, the blu
     }
     try {
       stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 960 } }
+        video: { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1080 } }
       });
       rxVideo.srcObject = stream;
       await rxVideo.play();

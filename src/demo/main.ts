@@ -262,10 +262,13 @@ function tick(): void {
     sh = rxSim.height;
   }
 
-  // The loopback canvas is already small; a real camera is not. Downscaling a
-  // 1280-wide capture to 480 leaves a 64-cell grid about four pixels per cell,
-  // which is below what the sampler can read once optics and moiré are in play.
-  const width = mode === "cam" ? Math.min(sw, 1280) : 480;
+  // The loopback canvas is already small; a real camera is not. Cell pitch in
+  // the capture is what buys blur tolerance, and it is the binding constraint
+  // on the denser grids: measured on the scene fixture, 80x80 reads 46% of its
+  // bands from a 1280-wide capture and 100% from a 1920-wide one, against a
+  // blur scaled to match. Decoding costs ~30 ms a frame at 1920, well inside
+  // the budget at any frame rate a camera can actually follow.
+  const width = mode === "cam" ? Math.min(sw, 1920) : 480;
   const height = Math.round((width * sh) / sw);
   capture.width = width;
   capture.height = height;
@@ -494,7 +497,7 @@ $("camBtn").onclick = async () => {
 
   try {
     stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 960 } },
+      video: { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1080 } },
     });
     rxVideo.srcObject = stream;
     await rxVideo.play();

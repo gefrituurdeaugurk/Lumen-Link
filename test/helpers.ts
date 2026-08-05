@@ -90,6 +90,19 @@ export function randomBytes(n: number, seed = 7): Uint8Array {
   return out;
 }
 
+/**
+ * A capture that caught the display mid-switch: rows above the seam show the
+ * previous transmitted frame, rows below show the next. A rolling shutter does
+ * this whenever the transmit rate approaches the camera's own, and no amount
+ * of light or focus prevents it.
+ */
+export function tearFrames(before: RgbaImage, after: RgbaImage, at: number): RgbaImage {
+  const seam = Math.max(0, Math.min(after.height, Math.round(after.height * at)));
+  const data = new Uint8ClampedArray(after.data);
+  data.set(before.data.subarray(0, seam * after.width * 4), 0);
+  return { data, width: after.width, height: after.height };
+}
+
 export interface SceneOptions extends RenderOptions {
   /** Frame width in pixels; height follows a 16:9 sensor. */
   readonly frameWidth?: number;

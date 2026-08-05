@@ -15,18 +15,18 @@ import { geometry } from "../src/core/geometry.ts";
 import { Transmitter } from "../src/core/transmitter.ts";
 import { Receiver } from "../src/receiver.ts";
 import { expectedMarkerRatio, findMarkerQuads, orderCorners } from "../src/vision/markers.ts";
-import { randomBytes, renderScene, type SceneOptions } from "./helpers.ts";
+import { randomBytes, renderScene, tearFrames, type SceneOptions } from "./helpers.ts";
 
 const FRAMES = 30;
 
-function lockRate(opts: SceneOptions & { grid?: number }): {
+function lockRate(opts: SceneOptions & { grid?: number; frames?: number }): {
   lock: number;
   band: number;
 } {
   const grid = opts.grid ?? 48;
   const tx = new Transmitter(randomBytes(2400, 5), { grid, name: "x.bin" });
   const rx = new Receiver(geometry(grid));
-  for (let i = 0; i < FRAMES; i++) {
+  for (let i = 0; i < (opts.frames ?? FRAMES); i++) {
     rx.processFrame(renderScene(tx.next().grid, { seed: i + 1, ...opts }));
   }
   const s = rx.stats;
@@ -79,6 +79,42 @@ test("a distant code still locks, on both grid sizes", () => {
     });
     assert.equal(lock, 100, `grid ${grid} locked ${lock.toFixed(0)}%`);
   }
+});
+
+test("a denser grid needs a denser capture", () => {
+  // Blur tolerance is set by cell pitch in the capture, not by the grid. At a
+  // 1280-wide capture 80x80 leaves ~6.5 px a cell and the lens closes it; the
+  // same optics over 1920 px leave ~9.8 and it reads clean. This is why the
+  // capture is not downscaled to 1280.
+  const near = lockRate({ ...room, grid: 80, fill: 0.45, frameWidth: 1280, blur: 2.5, frames: 6 });
+  const far = lockRate({ ...room, grid: 80, fill: 0.45, frameWidth: 1920, blur: 3.75, frames: 6 });
+
+  assert.ok(near.band < 80, `1280 capture read ${near.band.toFixed(0)}% of bands`);
+  assert.ok(far.band > 95, `1920 capture read ${far.band.toFixed(0)}% of bands`);
+});
+
+test("a torn capture costs the chroma symbol but not every band", () => {
+  // Each luma band carries its own CRC, so a seam only destroys the band it
+  // crosses. The blue plane is one symbol across the whole band region, so any
+  // seam at all destroys it — which is why transmitting near the camera's own
+  // frame rate collapses chroma while luma degrades gently.
+  const grid = 64;
+  const tx = new Transmitter(randomBytes(4000, 3), { grid, name: "x.bin" });
+  const rx = new Receiver(geometry(grid));
+  const scene = { ...room, frameWidth: 1280, fill: 0.45, blur: 1, seed: 1 };
+
+  let previous = renderScene(tx.next().grid, scene);
+  for (let i = 0; i < 12; i++) {
+    const current = renderScene(tx.next().grid, scene);
+    rx.processFrame(tearFrames(previous, current, 0.3 + 0.4 * ((i * 7) % 5) / 5));
+    previous = current;
+  }
+
+  const s = rx.stats;
+  const band = (100 * s.bandsPassed) / s.bandsTried;
+  const chroma = (100 * s.chromaPassed) / s.chromaTried;
+  assert.ok(band > 60, `band ${band.toFixed(0)}%`);
+  assert.ok(chroma < band, `chroma ${chroma.toFixed(0)}% vs band ${band.toFixed(0)}%`);
 });
 
 test("the expected marker ratio is fixed by the format, not by distance", () => {
