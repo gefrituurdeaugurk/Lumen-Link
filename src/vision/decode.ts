@@ -39,12 +39,24 @@ interface Sampled {
   readonly chroma: Float32Array;
 }
 
-/** Nearest-neighbour sample of one cell centre per grid cell. */
+/** Sample one cell centre per grid cell, averaged over the cell where the
+ *  capture has the resolution to spare. */
 function sampleGrid(img: RgbaImage, h: Homography, geo: Geometry): Sampled | null {
   const { data, width, height } = img;
   const W = geo.W;
   const luma = new Float32Array(W * W);
   const chroma = new Float32Array(W * W);
+
+  // One pixel per cell is all a tightly framed grid affords, but a camera
+  // capture usually has several. Averaging the middle of the cell there costs
+  // nothing and buys back most of the sensor noise. The window stays well
+  // inside the cell so a centre off by a pixel does not pull in its neighbour.
+  const [ax, ay] = applyHomography(h, 0.5, 0.5);
+  const [bx, by] = applyHomography(h, W - 0.5, 0.5);
+  const [cx0, cy0] = applyHomography(h, 0.5, W - 0.5);
+  const pitch =
+    Math.min(Math.hypot(bx - ax, by - ay), Math.hypot(cx0 - ax, cy0 - ay)) / Math.max(1, W - 1);
+  const radius = Math.min(3, Math.floor(pitch / 4));
 
   for (let cy = 0; cy < W; cy++) {
     for (let cx = 0; cx < W; cx++) {
@@ -53,10 +65,27 @@ function sampleGrid(img: RgbaImage, h: Homography, geo: Geometry): Sampled | nul
       const iy = Math.round(py);
       if (ix < 0 || iy < 0 || ix >= width || iy >= height) return null;
 
-      const o = (iy * width + ix) * 4;
-      const r = data[o];
-      const g = data[o + 1];
-      const b = data[o + 2];
+      let sr = 0;
+      let sg = 0;
+      let sb = 0;
+      let n = 0;
+      for (let dy = -radius; dy <= radius; dy++) {
+        const yy = iy + dy;
+        if (yy < 0 || yy >= height) continue;
+        for (let dx = -radius; dx <= radius; dx++) {
+          const xx = ix + dx;
+          if (xx < 0 || xx >= width) continue;
+          const o = (yy * width + xx) * 4;
+          sr += data[o];
+          sg += data[o + 1];
+          sb += data[o + 2];
+          n++;
+        }
+      }
+
+      const r = sr / n;
+      const g = sg / n;
+      const b = sb / n;
       luma[cy * W + cx] = 0.299 * r + 0.587 * g + 0.114 * b;
       // Blue/yellow difference. Differential against the other two channels,
       // so it survives the overall gain shifts that auto-exposure applies.

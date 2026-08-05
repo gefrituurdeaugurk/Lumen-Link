@@ -206,7 +206,10 @@ function tick(): void {
     sh = rxSim.height;
   }
 
-  const width = 480;
+  // The loopback canvas is already small; a real camera is not. Downscaling a
+  // 1280-wide capture to 480 leaves a 64-cell grid about four pixels per cell,
+  // which is below what the sampler can read once optics and moiré are in play.
+  const width = mode === "cam" ? Math.min(sw, 1280) : 480;
   const height = Math.round((width * sh) / sw);
   capture.width = width;
   capture.height = height;

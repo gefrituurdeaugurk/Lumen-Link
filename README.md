@@ -45,7 +45,7 @@ the frame. What it buys is margin. Palette index is `luma + 2 × blue`, so
 blue sits at luma ≈ 56 against a threshold of ≈ 135 — the worst-case luma
 margin in four-colour mode is ~79 levels. With only black and white on the
 grid it is ~120. In the headless pipeline that is the difference between
-failing and converging at a noise amplitude of 100.
+failing and converging at a noise amplitude of 190.
 
 The margin only materialises if the blue plane **mirrors** luma. Forcing it to
 a constant gives blue/white or black/yellow, either of which leaves a mid-luma

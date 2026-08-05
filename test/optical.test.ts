@@ -142,11 +142,12 @@ test("monochrome mode converges under noise that defeats four colours", () => {
 
   // Blue sits at luma ~56 against a ~135 threshold, so four-colour mode has a
   // worst-case margin of ~79 levels against monochrome's ~120. At this noise
-  // amplitude that difference is the whole ballgame.
-  const four = run(payload, "noisy.bin", 64, { noise: 100 }, { enhancement: true });
+  // amplitude that difference is the whole ballgame: four colours fail from
+  // ~175 up, monochrome holds to ~210.
+  const four = run(payload, "noisy.bin", 64, { noise: 190 }, { enhancement: true });
   assert.ok(!four.verified, "four-colour mode is expected to fail this hard");
 
-  const mono = run(payload, "noisy.bin", 64, { noise: 100 }, { enhancement: false });
+  const mono = run(payload, "noisy.bin", 64, { noise: 190 }, { enhancement: false });
   assert.ok(mono.verified, "monochrome mode should still converge");
   assert.deepEqual(mono.bytes, payload);
 });

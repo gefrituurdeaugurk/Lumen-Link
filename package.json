@@ -7,8 +7,7 @@
     "typecheck": "tsc --noEmit",
     "test": "tsc --noEmit && node --test test/*.test.ts",
     "serve": "node build.mjs && http-server -p 8080 -c-1",
-    "serve:public": "node build.mjs && mkdir -p dist && cp index.html dist/ && http-server dist -p 8080 -c-1",
-    "tunnel": "cloudflared tunnel --url http://localhost:8080"
+    "phone": "node scripts/phone.mjs"
   },
   "repository": {
     "type": "git",
