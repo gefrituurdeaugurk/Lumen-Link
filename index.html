@@ -1124,8 +1124,13 @@ Drag <b>Green ambient</b> up in loopback: separation on the scope drops, the blu
   };
 
   // src/core/set.ts
-  var DEFAULT_FRAMES_PER_SEGMENT = 120;
+  var DWELL_OVERSHOOT = 1.4;
+  var MIN_DWELL_FRAMES = 30;
   var MAX_SEGMENTS = 256;
+  function dwellFrames(K, enhancement) {
+    const perFrame = NBANDS - 1 / MANIFEST_INTERVAL + (enhancement ? 1 : 0);
+    return Math.max(MIN_DWELL_FRAMES, Math.ceil(K * DWELL_OVERSHOOT / perFrame));
+  }
   function segmentCapacity(grid) {
     return geometry(grid).symBytes * MAX_K;
   }
@@ -1143,14 +1148,14 @@ Drag <b>Green ambient</b> up in loopback: separation on the scope drops, the blu
      *  verify the reassembled file without a field the format does not have. */
     setId;
     segments;
-    framesPerSegment;
+    /** Frames each segment holds the screen for. */
+    dwell;
     total;
     index = 0;
     framesOnSegment = 0;
     constructor(payload2, opts) {
       this.setId = crc32(payload2);
       this.total = payload2.length;
-      this.framesPerSegment = opts.framesPerSegment ?? DEFAULT_FRAMES_PER_SEGMENT;
       const ceiling = segmentCapacity(opts.grid);
       const parts = segmentPayload(payload2, Math.min(opts.segmentBytes ?? ceiling, ceiling));
       if (parts.length > MAX_SEGMENTS) {
@@ -1175,6 +1180,10 @@ Drag <b>Green ambient</b> up in loopback: separation on the scope drops, the blu
           ...parts.length > 1 ? { set: { setId: this.setId, objIndex: i, objCount: parts.length } } : {}
         })
       );
+      const enhancement = opts.enhancement ?? true;
+      this.dwell = this.segments.map(
+        (segment) => opts.framesPerSegment !== void 0 ? opts.framesPerSegment : dwellFrames(segment.encoder.K, enhancement)
+      );
     }
     get objIndex() {
       return this.index;
@@ -1196,7 +1205,7 @@ Drag <b>Green ambient</b> up in loopback: separation on the scope drops, the blu
     }
     next() {
       const frame = this.current.next();
-      if (++this.framesOnSegment >= this.framesPerSegment) {
+      if (++this.framesOnSegment >= this.dwell[this.index]) {
         this.framesOnSegment = 0;
         this.index = (this.index + 1) % this.segments.length;
       }
@@ -1205,6 +1214,17 @@ Drag <b>Green ambient</b> up in loopback: separation on the scope drops, the blu
   };
   var SetAssembler = class {
     sets = /* @__PURE__ */ new Map();
+    /** Segments banked so far. Progress on the segment currently on screen is
+     *  the live session's business, not the assembler's. */
+    completed(setId) {
+      return this.sets.get(setId)?.parts.size ?? 0;
+    }
+    /** Bytes banked so far, for a rate estimate that survives segment changes. */
+    bytes(setId) {
+      let total = 0;
+      for (const part of this.sets.get(setId)?.parts.values() ?? []) total += part.length;
+      return total;
+    }
     /** Returns null for a session that is not part of a multi-object set. */
     add(manifest, bytes) {
       const set = manifest.set;
@@ -2354,14 +2374,23 @@ Drag <b>Green ambient</b> up in loopback: separation on the scope drops, the blu
     $("sepTxt").textContent = `\u0394 ${s.separation.toFixed(1)}` + (s.separation > CHROMA_FLOOR ? "  (usable)" : "  (below floor)");
     const session = rx.activeSession;
     if (session) {
-      const pct = 100 * session.decoder.have / session.decoder.K;
       const set = session.manifest.set;
+      const fraction = session.decoder.have / session.decoder.K;
+      const pct = set ? 100 * (assembler.completed(set.setId) + fraction) / set.objCount : 100 * fraction;
       $("pFill").style.width = `${pct.toFixed(1)}%`;
       $("pFill").className = "fill" + (s.chromaPassed > 0 ? " blue" : "");
-      $("pTxt").textContent = `${session.manifest.name}  \xB7  ` + (set ? `segment ${set.objIndex + 1} / ${set.objCount}  \xB7  ` : "") + `${session.decoder.have} / ${session.decoder.K} blocks` + (session.closingIn !== null ? `  \xB7  closing in ${session.closingIn}` : "");
+      $("pTxt").textContent = `${session.manifest.name}  \xB7  ` + (set ? `segment ${set.objIndex + 1} / ${set.objCount}  \xB7  ` : "") + `${session.decoder.have} / ${session.decoder.K} blocks` + remainingText(session, pct) + (session.closingIn !== null ? `  \xB7  closing in ${session.closingIn}` : "");
       $("pPct").textContent = `${pct.toFixed(0)}%`;
     }
     drawScope(scope, history);
+  }
+  function remainingText(session, pct) {
+    if (!rx || pct <= 0 || pct >= 100) return "";
+    const elapsed = (performance.now() - rxStart) / 1e3;
+    if (elapsed < 5 || rx.stats.bytesAccepted === 0) return "";
+    const left = Math.round(elapsed / pct * (100 - pct));
+    if (!Number.isFinite(left)) return "";
+    return left > 90 ? `  \xB7  ~${Math.round(left / 60)} min left` : `  \xB7  ~${left} s left`;
   }
   function present(session) {
     if (!rx) return;

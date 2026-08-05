@@ -89,9 +89,10 @@ export {
 } from "./core/raster.ts";
 
 export {
-  DEFAULT_FRAMES_PER_SEGMENT,
+  MAX_SEGMENTS,
   SetAssembler,
   SetTransmitter,
+  dwellFrames,
   segmentCapacity,
   segmentPayload,
   type SetProgress,

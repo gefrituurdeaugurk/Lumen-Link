@@ -9,11 +9,22 @@ import assert from "node:assert/strict";
 import { geometry } from "../src/core/geometry.ts";
 import { MAX_K } from "../src/core/lt.ts";
 import { Transmitter } from "../src/core/transmitter.ts";
-import { SetAssembler, SetTransmitter, segmentCapacity, segmentPayload } from "../src/core/set.ts";
+import { SetAssembler, SetTransmitter, dwellFrames, segmentCapacity, segmentPayload } from "../src/core/set.ts";
 import { Receiver } from "../src/receiver.ts";
 import { randomBytes, renderGrid } from "./helpers.ts";
 
 const MAX_FRAMES = 900;
+
+test("a segment holds the screen long enough to deliver itself", () => {
+  // A flat rotation count is wrong at any real size: at 64x64 a full segment
+  // is 8192 blocks against under five symbols a frame, so a hundred frames
+  // deliver about six per cent of it and nothing ever converges.
+  const full = dwellFrames(MAX_K, true);
+  assert.ok(full > MAX_K / 5, `${full} frames for ${MAX_K} blocks`);
+
+  // Dropping the enhancement layer costs a symbol a frame, so the slot grows.
+  assert.ok(dwellFrames(MAX_K, false) > full);
+});
 
 test("a payload over the ceiling is refused by a single session", () => {
   const oversize = new Uint8Array(segmentCapacity(48) + 1);

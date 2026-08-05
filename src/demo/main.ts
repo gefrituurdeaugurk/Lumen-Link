@@ -330,19 +330,41 @@ function updateMeters(): void {
 
   const session = rx.activeSession;
   if (session) {
-    const pct = (100 * session.decoder.have) / session.decoder.K;
     const set = session.manifest.set;
+    const fraction = session.decoder.have / session.decoder.K;
+
+    // Per-segment progress reads as a reset every time the transmitter
+    // rotates, so a set is measured across the whole object instead.
+    const pct = set
+      ? (100 * (assembler.completed(set.setId) + fraction)) / set.objCount
+      : 100 * fraction;
+
     $("pFill").style.width = `${pct.toFixed(1)}%`;
     $("pFill").className = "fill" + (s.chromaPassed > 0 ? " blue" : "");
     $("pTxt").textContent =
       `${session.manifest.name}  ·  ` +
       (set ? `segment ${set.objIndex + 1} / ${set.objCount}  ·  ` : "") +
       `${session.decoder.have} / ${session.decoder.K} blocks` +
+      remainingText(session, pct) +
       (session.closingIn !== null ? `  ·  closing in ${session.closingIn}` : "");
     $("pPct").textContent = `${pct.toFixed(0)}%`;
   }
 
   drawScope(scope, history);
+}
+
+/** Time left at the goodput measured so far. Worth showing because the honest
+ *  answer at 64x64 is minutes, and without it a slow bar looks like a stall. */
+function remainingText(session: Session, pct: number): string {
+  if (!rx || pct <= 0 || pct >= 100) return "";
+  const elapsed = (performance.now() - rxStart) / 1000;
+  if (elapsed < 5 || rx.stats.bytesAccepted === 0) return "";
+
+  const left = Math.round((elapsed / pct) * (100 - pct));
+  if (!Number.isFinite(left)) return "";
+  return left > 90
+    ? `  ·  ~${Math.round(left / 60)} min left`
+    : `  ·  ~${left} s left`;
 }
 
 function present(session: Session): void {

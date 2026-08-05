@@ -14,19 +14,37 @@
  */
 
 import { crc32 } from "./crc.ts";
-import { geometry } from "./geometry.ts";
+import { geometry, NBANDS } from "./geometry.ts";
 import { MAX_K } from "./lt.ts";
 import type { EncryptionInfo, Manifest } from "./manifest.ts";
 import type { CellGrid } from "./raster.ts";
 import { assignNonces } from "./session.ts";
-import { Transmitter, type FrameStats } from "./transmitter.ts";
+import { MANIFEST_INTERVAL, Transmitter, type FrameStats } from "./transmitter.ts";
 
-/** Frames spent on one segment before moving to the next. */
-export const DEFAULT_FRAMES_PER_SEGMENT = 120;
+/** Symbols a segment emits past its own K before the next one gets the
+ *  screen. A receiver loses some to CRC, so a bare 1.0 would guarantee that
+ *  nobody ever finishes a segment in one visit. */
+const DWELL_OVERSHOOT = 1.4;
+/** Floor for tiny segments, so rotation stays visible rather than flickering. */
+const MIN_DWELL_FRAMES = 30;
 
 /** Objects in one set. Bounded by the 8-bit short id: every segment needs a
  *  distinct one, or the router binds a symbol to the wrong decoder. */
 export const MAX_SEGMENTS = 256;
+
+/**
+ * Frames to hold one segment on screen.
+ *
+ * Rotating on a fixed count is wrong at any real size: at 64x64 a full
+ * segment is K = 8192 blocks against fewer than five symbols a frame, so a
+ * hundred-frame slot delivers about six per cent of it and neither segment
+ * ever converges until a dozen passes have gone by. Sizing the slot to the
+ * segment lets a receiver watching from the start finish it in one visit.
+ */
+export function dwellFrames(K: number, enhancement: boolean): number {
+  const perFrame = NBANDS - 1 / MANIFEST_INTERVAL + (enhancement ? 1 : 0);
+  return Math.max(MIN_DWELL_FRAMES, Math.ceil((K * DWELL_OVERSHOOT) / perFrame));
+}
 
 /** Largest payload a single session can carry on this grid. */
 export function segmentCapacity(grid: number): number {
@@ -63,7 +81,8 @@ export class SetTransmitter {
    *  verify the reassembled file without a field the format does not have. */
   readonly setId: number;
   readonly segments: readonly Transmitter[];
-  readonly framesPerSegment: number;
+  /** Frames each segment holds the screen for. */
+  readonly dwell: readonly number[];
   readonly total: number;
 
   private index = 0;
@@ -72,7 +91,6 @@ export class SetTransmitter {
   constructor(payload: Uint8Array, opts: SetTransmitterOptions) {
     this.setId = crc32(payload);
     this.total = payload.length;
-    this.framesPerSegment = opts.framesPerSegment ?? DEFAULT_FRAMES_PER_SEGMENT;
 
     const ceiling = segmentCapacity(opts.grid);
     const parts = segmentPayload(payload, Math.min(opts.segmentBytes ?? ceiling, ceiling));
@@ -107,6 +125,13 @@ export class SetTransmitter {
             : {}),
         }),
     );
+
+    const enhancement = opts.enhancement ?? true;
+    this.dwell = this.segments.map((segment) =>
+      opts.framesPerSegment !== undefined
+        ? opts.framesPerSegment
+        : dwellFrames(segment.encoder.K, enhancement),
+    );
   }
 
   get objIndex(): number {
@@ -135,7 +160,7 @@ export class SetTransmitter {
 
   next(): { grid: CellGrid; stats: FrameStats } {
     const frame = this.current.next();
-    if (++this.framesOnSegment >= this.framesPerSegment) {
+    if (++this.framesOnSegment >= this.dwell[this.index]) {
       this.framesOnSegment = 0;
       this.index = (this.index + 1) % this.segments.length;
     }
@@ -166,6 +191,19 @@ interface SetEntry {
  */
 export class SetAssembler {
   private readonly sets = new Map<number, SetEntry>();
+
+  /** Segments banked so far. Progress on the segment currently on screen is
+   *  the live session's business, not the assembler's. */
+  completed(setId: number): number {
+    return this.sets.get(setId)?.parts.size ?? 0;
+  }
+
+  /** Bytes banked so far, for a rate estimate that survives segment changes. */
+  bytes(setId: number): number {
+    let total = 0;
+    for (const part of this.sets.get(setId)?.parts.values() ?? []) total += part.length;
+    return total;
+  }
 
   /** Returns null for a session that is not part of a multi-object set. */
   add(manifest: Manifest, bytes: Uint8Array): SetProgress | null {
