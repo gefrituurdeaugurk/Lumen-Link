@@ -504,6 +504,7 @@ Drag <b>Green ambient</b> up in loopback: separation on the scope drops, the blu
   // src/core/lt.ts
   var ESI_SPACE = 1 << 16;
   var MAX_K = 8192;
+  var FOUNTAIN_OVERHEAD = 1.1;
   var DELTA = 0.05;
   var C = 0.03;
   function solitonCDF(K) {
@@ -606,6 +607,19 @@ Drag <b>Green ambient</b> up in loopback: separation on the scope drops, the blu
      *  nothing new to offer and a stalled session must be abandoned. */
     get distinctSeen() {
       return this.seen.size;
+    }
+    /**
+     * How far along this session is, 0..1.
+     *
+     * Not `have / K`. Recovery is a peeling cascade that does almost nothing
+     * until the graph tips over: measured at K=8192, collecting a full K symbols
+     * recovers only 5% of the blocks, and the remaining 95% land in the last few
+     * per cent of the transfer. Counting the symbols that have arrived rises
+     * linearly with time on air, which is what a progress bar is claiming to be.
+     */
+    get progress() {
+      if (this.complete) return 1;
+      return Math.min(0.99, this.distinctSeen / (this.K * FOUNTAIN_OVERHEAD));
     }
     get exhausted() {
       return !this.complete && this.seen.size >= ESI_SPACE;
@@ -2375,11 +2389,11 @@ Drag <b>Green ambient</b> up in loopback: separation on the scope drops, the blu
     const session = rx.activeSession;
     if (session) {
       const set = session.manifest.set;
-      const fraction = session.decoder.have / session.decoder.K;
+      const fraction = session.decoder.progress;
       const pct = set ? 100 * (assembler.completed(set.setId) + fraction) / set.objCount : 100 * fraction;
       $("pFill").style.width = `${pct.toFixed(1)}%`;
       $("pFill").className = "fill" + (s.chromaPassed > 0 ? " blue" : "");
-      $("pTxt").textContent = `${session.manifest.name}  \xB7  ` + (set ? `segment ${set.objIndex + 1} / ${set.objCount}  \xB7  ` : "") + `${session.decoder.have} / ${session.decoder.K} blocks` + remainingText(session, pct) + (session.closingIn !== null ? `  \xB7  closing in ${session.closingIn}` : "");
+      $("pTxt").textContent = `${session.manifest.name}  \xB7  ` + (set ? `segment ${set.objIndex + 1} / ${set.objCount}  \xB7  ` : "") + `${session.decoder.distinctSeen} / ${session.decoder.K} symbols` + remainingText(session, pct) + (session.closingIn !== null ? `  \xB7  closing in ${session.closingIn}` : "");
       $("pPct").textContent = `${pct.toFixed(0)}%`;
     }
     drawScope(scope, history);

@@ -120,6 +120,32 @@ test("fountain overhead stays within a sane multiple of K", () => {
   assert.ok(used < enc.K * 2, `used ${used} symbols for K=${enc.K}, expected well under 2x`);
 });
 
+test("progress tracks symbols collected, not blocks recovered", () => {
+  // Peeling does almost nothing until the graph tips over, so `have` is flat
+  // for the whole transfer and then jumps. A bar driven by it tells the user
+  // nothing. Measured at K=8192: a full K symbols in recovers 5% of blocks.
+  const payload = randomBytes(160_000, 41);
+  const enc = new LTEncoder(payload, 80);
+  const dec = new LTDecoder(enc.K, 80, enc.total, enc.fileCRC);
+
+  let atHalf = { recovered: 0, progress: 0 };
+  while (!dec.complete && enc.emitted < enc.K * 2) {
+    const s = enc.next();
+    dec.add(s.esi, s.data);
+    if (dec.distinctSeen === Math.floor(enc.K / 2)) {
+      atHalf = { recovered: dec.have / enc.K, progress: dec.progress };
+    }
+  }
+
+  assert.ok(dec.complete);
+  assert.ok(atHalf.recovered < 0.1, `recovered ${(100 * atHalf.recovered).toFixed(0)}% at the halfway point`);
+  assert.ok(
+    Math.abs(atHalf.progress - 0.45) < 0.06,
+    `progress read ${(100 * atHalf.progress).toFixed(0)}% at the halfway point`,
+  );
+  assert.equal(dec.progress, 1);
+});
+
 test("oversized payloads are refused rather than silently exceeding ESI space", () => {
   const tooBig = new Uint8Array((MAX_K + 1) * 8);
   assert.throws(() => new LTEncoder(tooBig, 8), /segment it across sessions/);

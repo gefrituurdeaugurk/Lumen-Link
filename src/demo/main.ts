@@ -334,7 +334,7 @@ function updateMeters(): void {
   const session = rx.activeSession;
   if (session) {
     const set = session.manifest.set;
-    const fraction = session.decoder.have / session.decoder.K;
+    const fraction = session.decoder.progress;
 
     // Per-segment progress reads as a reset every time the transmitter
     // rotates, so a set is measured across the whole object instead.
@@ -347,7 +347,7 @@ function updateMeters(): void {
     $("pTxt").textContent =
       `${session.manifest.name}  ·  ` +
       (set ? `segment ${set.objIndex + 1} / ${set.objCount}  ·  ` : "") +
-      `${session.decoder.have} / ${session.decoder.K} blocks` +
+      `${session.decoder.distinctSeen} / ${session.decoder.K} symbols` +
       remainingText(session, pct) +
       (session.closingIn !== null ? `  ·  closing in ${session.closingIn}` : "");
     $("pPct").textContent = `${pct.toFixed(0)}%`;

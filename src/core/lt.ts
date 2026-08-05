@@ -20,6 +20,10 @@ export const ESI_SPACE = 1 << 16;
  *  generous fountain overhead (>=8x K). See SPEC.md §7. */
 export const MAX_K = 8192;
 
+/** Symbols needed to finish, as a multiple of K. Measured on this decoder:
+ *  1.056x at K=8192, 1.075x at 5702, 1.095x at 2000, 1.166x at 500. */
+export const FOUNTAIN_OVERHEAD = 1.1;
+
 const DELTA = 0.05;
 const C = 0.03;
 
@@ -151,6 +155,20 @@ export class LTDecoder {
    *  nothing new to offer and a stalled session must be abandoned. */
   get distinctSeen(): number {
     return this.seen.size;
+  }
+
+  /**
+   * How far along this session is, 0..1.
+   *
+   * Not `have / K`. Recovery is a peeling cascade that does almost nothing
+   * until the graph tips over: measured at K=8192, collecting a full K symbols
+   * recovers only 5% of the blocks, and the remaining 95% land in the last few
+   * per cent of the transfer. Counting the symbols that have arrived rises
+   * linearly with time on air, which is what a progress bar is claiming to be.
+   */
+  get progress(): number {
+    if (this.complete) return 1;
+    return Math.min(0.99, this.distinctSeen / (this.K * FOUNTAIN_OVERHEAD));
   }
 
   get exhausted(): boolean {

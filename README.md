@@ -17,7 +17,7 @@ is the built demo — open it directly, no server required.
 ```bash
 npm install
 npm run build     # bundles the demo into index.html
-npm test          # typecheck + 75 tests
+npm test          # typecheck + 79 tests
 npm run serve     # build and serve on :8080
 npm run phone     # build, serve, and open a public HTTPS tunnel
 ```
@@ -70,7 +70,7 @@ src/core/      protocol — codec, framing, sessions, manifest. No DOM.
 src/vision/    capture pipeline — markers, homography, colour decisions.
 src/receiver.ts  the two, wired together
 src/demo/      presentation only: canvas, UI, loopback simulator
-test/          75 tests, including a full optical loop with no browser
+test/          79 tests, including a full optical loop with no browser
 ```
 
 The split is load-bearing: `core` and `vision` never touch the DOM, so the
