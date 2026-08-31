@@ -11,6 +11,27 @@ axis carries an enhancement layer, and an LT fountain runs over both: any
 K(1+ε) distinct symbols reconstruct the payload, so *which* ones you catch
 does not matter.
 
+## Install
+
+```bash
+npm install lumen-link
+```
+
+The package ships an ESM public API, usable in modern browsers and Node.js 20+
+(where Web Crypto is available globally):
+
+```ts
+import { Receiver, Transmitter, geometry } from "lumen-link";
+
+const tx = new Transmitter(new TextEncoder().encode("hello"), { grid: 64 });
+const rx = new Receiver(geometry(64));
+const { grid } = tx.next();
+```
+
+`Transmitter` renders frames through the exported raster helpers; `Receiver`
+accepts camera or canvas pixels as an `RgbaImage`. The complete public surface
+is exported from the package root. See [SPEC.md](SPEC.md) for the wire format.
+
 **[SPEC.md](SPEC.md)** is the wire specification. **[index.html](index.html)**
 is the built demo — open it directly, no server required.
 

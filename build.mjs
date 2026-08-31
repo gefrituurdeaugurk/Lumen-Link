@@ -8,11 +8,25 @@
  */
 
 import { build } from "esbuild";
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 const root = dirname(fileURLToPath(import.meta.url));
+
+await rm(join(root, "dist"), { recursive: true, force: true });
+await mkdir(join(root, "dist"), { recursive: true });
+
+await build({
+  entryPoints: [join(root, "src/index.ts")],
+  bundle: true,
+  format: "esm",
+  target: "es2022",
+  platform: "neutral",
+  sourcemap: true,
+  legalComments: "none",
+  outfile: join(root, "dist/index.js"),
+});
 
 const result = await build({
   entryPoints: [join(root, "src/demo/main.ts")],

@@ -1,9 +1,36 @@
 {
   "name": "lumen-link",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Rateless optical file transfer over a four-colour grid",
+  "keywords": [
+    "optical-transfer",
+    "fountain-code",
+    "file-transfer",
+    "qr-alternative",
+    "webcrypto"
+  ],
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "SPEC.md"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
-    "build": "node build.mjs",
+    "build": "node build.mjs && tsc --project tsconfig.build.json && node scripts/fix-declaration-imports.mjs",
     "typecheck": "tsc --noEmit",
     "test": "tsc --noEmit && node --test test/*.test.ts",
     "serve": "node build.mjs && http-server -p 8080 -c-1",
@@ -21,8 +48,5 @@
     "typescript": "^7.0.2"
   },
   "type": "module",
-  "private": true,
-  "dependencies": {
-    "sh": "^0.0.3"
-  }
+  "private": false
 }
