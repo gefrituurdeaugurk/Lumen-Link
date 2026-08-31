@@ -83,6 +83,12 @@ Built with TypeScript 7 (`tsc`, the native compiler) and esbuild. The demo is
 bundled inline into a single self-contained `index.html` so it keeps working
 from a `file://` URL.
 
+## License
+
+Copyright (c) 2026 Jeroen de Cloe. Licensed under the [MIT License](LICENSE).
+Redistributions of this project or substantial portions of it must retain the
+copyright and license notice.
+
 ## What version 2 changed
 
 Version 1 had no session identity. A receiver could not tell one file from
